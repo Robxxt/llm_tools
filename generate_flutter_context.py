@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import re
 from pathlib import Path
@@ -93,42 +94,37 @@ def parse_dart_file(filepath):
 
     purpose = extract_file_purpose(content)
 
-    # Remove multiline comments to prevent brace-counting errors
-    content_no_block = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+    # Remove multiline comments but keep newlines to maintain accurate line counts
+    content_no_block = re.sub(r'/\*.*?\*/', lambda m: '\n' * m.group(0).count('\n'), content, flags=re.DOTALL)
     lines = content_no_block.split('\n')
 
     types = []        # list of (kind, name, extras)
-    # name -> {'fields': [..], 'ctor': str|None, 'methods': [..]}
     classes = {}
-    functions = []    # list of unique top-level function signatures
+    functions = []    # list of unique top-level function dicts
     providers = []    # list of provider names
+    
     current_class = None
     class_brace_level = -1
+    current_func = None
+    func_brace_level = -1
     brace_count = 0
 
     class_regex = re.compile(r'^\s*(?:abstract\s+)?(class|mixin|extension|enum)\s+([A-Za-z0-9_]+)')
     provider_regex = re.compile(
         r'\b([A-Za-z0-9_]+Provider)\s*=\s*(?:StateProvider|Provider|StreamProvider|FutureProvider|StateNotifierProvider|ChangeNotifierProvider|NotifierProvider)'
     )
-    # Declaration-only matcher: anchored at line start, and the text immediately
-    # after the closing ')' must be '{', '=>', 'async', or end-of-line. This
-    # rejects call sites (which end with ';' or continue with ',', '.', ')').
-    # Captures an optional return-type prefix and the parameter list.
+    # Declaration-only matcher
     decl_regex = re.compile(
         r'^\s*(?:@override\s+)?'
         r'(?P<rtype>[A-Za-z0-9_<>,\[\]\?\s]*?)\s*'
         r'(?P<name>[a-zA-Z_][A-Za-z0-9_]*)\s*\((?P<args>[^)]*)\)'
         r'\s*(?:async\s*)?(?:\{|=>|$)'
     )
-    # Field matcher: `<modifiers> <Type> <name>;` optionally with an initializer.
-    # Only applied while directly inside a class body (not inside a method),
-    # which is tracked via brace depth.
+    # Field matcher
     field_regex = re.compile(
         r'^\s*(?:static\s+)?(?:final\s+|const\s+|late\s+)*'
         r'(?P<ftype>[A-Za-z0-9_<>,\[\]\?\s]+?)\s+(?P<fname>[a-zA-Z_]\w*)\s*(?:=[^;]+)?;'
     )
-    # Keywords that, if present at the start of a statement, mean it is NOT a
-    # declaration (e.g. `return _foo();`, `final x = _foo();`).
     stmt_keywords = {'if', 'for', 'while', 'switch', 'catch', 'return', 'super',
                      'print', 'new', 'throw', 'assert', 'await', 'yield', 'final',
                      'var', 'const', 'late', 'external', 'static', 'get', 'set',
@@ -142,13 +138,13 @@ def parse_dart_file(filepath):
         rtype = re.sub(r'\bstatic\b', '', rtype)
         return re.sub(r'\s+', ' ', rtype).strip()
 
-    for line in lines:
+    for i, line in enumerate(lines):
+        line_num = i + 1
         line_clean = line.split('//')[0]
         stripped = line_clean.strip()
         if not stripped:
             continue
 
-        # Are we directly inside a class body (one level past the class brace)?
         in_class_body = (current_class is not None
                          and brace_count == class_brace_level + 1)
 
@@ -158,7 +154,7 @@ def parse_dart_file(filepath):
             name = class_match.group(2)
             current_class = name
             class_brace_level = brace_count
-            classes.setdefault(name, {'fields': [], 'ctor': None, 'methods': []})
+            classes.setdefault(name, {'fields': [], 'ctor': None, 'methods': [], 'start_line': line_num, 'end_line': '?'})
             extras = re.search(
                 r'(extends|implements|with|on)\s+([A-Za-z0-9_,\s\.<>]+?)(?:\s*\{|\s*$)',
                 line_clean,
@@ -170,15 +166,12 @@ def parse_dart_file(filepath):
             if not current_class and pm.group(1) not in providers:
                 providers.append(pm.group(1))
 
-        # Field detection (only when directly in a class body).
         if in_class_body and ';' in line_clean and '(' not in line_clean and '=>' not in line_clean:
             fm = field_regex.match(line_clean)
             if fm:
                 ftype = re.sub(r'\s+', ' ', fm.group('ftype')).strip()
                 fname = fm.group('fname')
                 tokens = ftype.split()
-                # Reject: empty type (e.g. last enum value `master;`), or
-                # keyword-led statements misread as fields.
                 if not tokens or tokens[0] in stmt_keywords:
                     pass
                 else:
@@ -193,6 +186,7 @@ def parse_dart_file(filepath):
             rtype = clean_rtype(decl_match.group('rtype'))
             args = normalize_args(decl_match.group('args'))
             first_token = stripped.split()[0] if stripped.split() else ''
+            
             if fname in stmt_keywords or first_token in stmt_keywords:
                 pass  # not a declaration
             elif current_class and fname == current_class:
@@ -206,25 +200,41 @@ def parse_dart_file(filepath):
                 else:
                     sig = f"{rtype + ' ' if rtype else ''}{fname}({args})"
                     entry = classes[current_class]
-                    if sig not in entry['methods']:
-                        entry['methods'].append(sig)
+                    if not any(isinstance(m, dict) and m['sig'] == sig for m in entry['methods']):
+                        func_dict = {'sig': sig, 'start_line': line_num, 'end_line': line_num}
+                        entry['methods'].append(func_dict)
+                        if '{' in line_clean and '=>' not in line_clean:
+                            func_dict['end_line'] = '?'
+                            current_func = func_dict
+                            func_brace_level = brace_count
             else:
                 # top-level function
                 if fname in NOISE_METHODS or fname[0].isupper():
                     pass
                 else:
                     sig = f"{rtype + ' ' if rtype else ''}{fname}({args})"
-                    if sig not in functions:
-                        functions.append(sig)
+                    if not any(isinstance(f, dict) and f['sig'] == sig for f in functions):
+                        func_dict = {'sig': sig, 'start_line': line_num, 'end_line': line_num}
+                        functions.append(func_dict)
+                        if '{' in line_clean and '=>' not in line_clean:
+                            func_dict['end_line'] = '?'
+                            current_func = func_dict
+                            func_brace_level = brace_count
 
         brace_count += line_clean.count('{') - line_clean.count('}')
+        
+        # Track function/method end line
+        if current_func and brace_count <= func_brace_level:
+            current_func['end_line'] = line_num
+            current_func = None
+            func_brace_level = -1
+            
+        # Track class end line
         if current_class and brace_count <= class_brace_level:
+            classes[current_class]['end_line'] = line_num
             current_class = None
             class_brace_level = -1
 
-    # Fallback: capture multi-line constructors (params spanning several lines)
-    # that the line-by-line pass missed. Anchored at start-of-line to avoid
-    # matching `return ClassName(...)` call sites.
     for kind, name, _ in types:
         if kind.lower() != 'class':
             continue
@@ -238,7 +248,7 @@ def parse_dart_file(filepath):
         cm = ctor_re.search(content_no_block)
         if cm:
             args = re.sub(r'\s+', ' ', cm.group(1)).strip()
-            args = re.sub(r',\s*}', '}', args)  # tidy trailing comma in named params
+            args = re.sub(r',\s*}', '}', args)
             entry['ctor'] = f"{name}({args})"
 
     return {
@@ -259,23 +269,32 @@ def render_file_detail(rel_path, parsed):
 
     if parsed["types"]:
         for kind, name, extras in parsed["types"]:
-            out.append(f"**{kind}: {name}**{extras}")
             entry = parsed["classes"].get(name, {'fields': [], 'ctor': None, 'methods': []})
-            if entry['fields']:
+            start = entry.get('start_line', '?')
+            end = entry.get('end_line', '?')
+            out.append(f"**{kind}: {name}**{extras} *(Lines {start}-{end})*")
+            
+            if entry.get('fields'):
                 out.append(f"  - Fields: {', '.join('`' + f + '`' for f in entry['fields'])}")
-            if entry['ctor']:
+            if entry.get('ctor'):
                 out.append(f"  - `{entry['ctor']}`")
-            for m in entry['methods']:
-                out.append(f"  - `{m}`")
+            for m in entry.get('methods', []):
+                if isinstance(m, dict):
+                    out.append(f"  - `{m['sig']}` *(Lines {m['start_line']}-{m['end_line']})*")
+                else:
+                    out.append(f"  - `{m}`")
             out.append("")
 
-    if parsed["functions"]:
+    if parsed.get("functions"):
         out.append("**Top-level functions:**")
         for fn in parsed["functions"]:
-            out.append(f"  - `{fn}`")
+            if isinstance(fn, dict):
+                out.append(f"  - `{fn['sig']}` *(Lines {fn['start_line']}-{fn['end_line']})*")
+            else:
+                out.append(f"  - `{fn}`")
         out.append("")
 
-    if parsed["providers"]:
+    if parsed.get("providers"):
         out.append("**Providers:** " + ", ".join(f"`{p}`" for p in parsed["providers"]))
         out.append("")
 
