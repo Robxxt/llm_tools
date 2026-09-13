@@ -33,8 +33,12 @@ Fill job forms on any website by **copy-pasting verbatim info from your CV** usi
   provider). `base_url` must be a plain `http(s)` URL; `file://`, credential
   URLs, etc. are rejected to prevent SSRF/open-proxy abuse.
 - Backend CORS is locked to the extension origin (`moz-extension://…`) and the
-  local dashboard, so a website you visit cannot read `/api/settings` (CV +
-  API key) or drive the backend.
+  local dashboard, so a website you visit cannot read `/api/settings` (your CV)
+  or drive the backend.
+- **The API key is never written to `settings.json`.** It is read at startup
+  from `backend/.env` (git-ignored) or the process environment —
+  `CVFILL_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` or `LLM_API_KEY`.
+  The dashboard can override it for the current session only.
 - `extension/tests/test_network_safety.test.js` and the CORS/base-url tests in
   `backend/test_app.py` guard these properties against regressions.
 
@@ -61,12 +65,24 @@ If the browser can't reach Ollama directly, the Flask backend proxies it, so no 
 ## Backend dashboard (settings in the browser)
 
 Open **http://127.0.0.1:5000/** while the backend runs: set the provider
-`base_url` + model + API key, paste/upload the CV, and use **Test connection**.
-Saved to `backend/settings.json` (localhost only, git-ignored — it may hold your
-API key). The dashboard has a **dark/light theme toggle** (follows your system
-preference by default). This is the only place you configure things: the
-extension sends just the scanned fields and the backend falls back to the stored
-provider **and** stored CV.
+`base_url` + model, paste/upload the CV, and use **Test connection**.
+`base_url`, model and CV are saved to `backend/settings.json` (localhost only,
+git-ignored). **The API key is never saved there** — put it in `backend/.env`
+(also git-ignored), which the backend loads at startup:
+
+```bash
+# backend/.env
+OPENROUTER_API_KEY=sk-or-...
+# or a generic name:
+CVFILL_API_KEY=sk-...
+```
+
+If a remote provider has no key, the backend refuses to call it and tells you to
+add the entry to `backend/.env`. Local providers such as Ollama need no key.
+
+The dashboard has a **dark/light theme toggle** (follows your system preference
+by default). This is the only place you configure things: the extension syncs
+the provider + CV from the backend and sends just the scanned fields.
 
 ## Load the extension in Firefox
 

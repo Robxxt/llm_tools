@@ -299,6 +299,8 @@ def test_main_respects_port_env_var(monkeypatch):
 def isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("CVFILL_SETTINGS",
                        str(tmp_path / "settings.json"))
+    import app as appmod
+    monkeypatch.setattr(appmod, "_runtime_api_key", "")
     return tmp_path / "settings.json"
 
 
@@ -307,18 +309,147 @@ def test_settings_get_returns_empty_shape(client, isolated_settings):
     assert resp.status_code == 200
     body = resp.get_json()
     assert body == {"base_url": "", "model": "",
-                    "api_key": "", "cv_text": ""}
+                    "cv_text": "", "api_key_set": False}
 
 
 def test_settings_post_roundtrip(client, isolated_settings):
     payload = {"base_url": "http://localhost:11434/v1",
-               "model": "llama3.1", "api_key": "",
+               "model": "llama3.1",
                "cv_text": "Jane Smith\njane@example.com"}
     resp = client.post("/api/settings", json=payload)
     assert resp.status_code == 200
-    assert client.get("/api/settings").get_json() == payload
-    # persisted to disk, not just memory
+    assert client.get("/api/settings").get_json() == {
+        **payload, "api_key_set": False}
+    # persisted to disk, not just memory, and the key is not there
     assert json.loads(isolated_settings.read_text()) == payload
+
+
+def test_api_key_never_persisted_but_used(client, isolated_settings, monkeypatch):
+    client.post("/api/settings", json={
+        "base_url": "http://stored:8080/v1", "model": "m",
+        "cv_text": "John Doe", "api_key": "secret-key"})
+    # not on disk, not echoed back
+    assert "api_key" not in json.loads(isolated_settings.read_text())
+    got = client.get("/api/settings").get_json()
+    assert "api_key" not in got
+    assert got["api_key_set"] is True
+
+    seen = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(
+                {"values": {"f0": "John Doe"}})}}]}
+
+    import app as appmod
+
+    def fake_post(url, headers=None, **kwargs):
+        seen["auth"] = (headers or {}).get("Authorization")
+        return FakeResp()
+
+    monkeypatch.setattr(appmod.requests, "post", fake_post)
+    resp = client.post("/api/suggest-fill", json={
+        "cv_text": "John Doe",
+        "fields": [{"key": "f0", "label": "Full name"}],
+        "provider": {"base_url": "http://stored:8080/v1", "model": "m"},
+    })
+    assert resp.status_code == 200
+    assert seen["auth"] == "Bearer secret-key"
+
+
+def test_strip_api_key_from_file(tmp_path, isolated_settings):
+    import app as appmod
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({
+        "base_url": "http://x/v1", "model": "m", "cv_text": "cv",
+        "api_key": "legacy-secret"}))
+    assert appmod.strip_api_key_from_file(str(path)) is True
+    data = json.loads(path.read_text())
+    assert "api_key" not in data
+    assert appmod.get_api_key() == "legacy-secret"
+
+
+def test_load_env_file_sets_api_key(tmp_path, monkeypatch):
+    import app as appmod
+    for name in appmod.KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    env = tmp_path / ".env"
+    env.write_text("# provider key\nOPENROUTER_API_KEY=sk-or-test\n")
+    appmod.load_env_file(str(env))
+    assert appmod.env_api_key() == "sk-or-test"
+
+
+def test_load_env_file_does_not_override_existing_env(tmp_path, monkeypatch):
+    import app as appmod
+    monkeypatch.setenv("CVFILL_API_KEY", "from-shell")
+    env = tmp_path / ".env"
+    env.write_text("CVFILL_API_KEY=from-file\n")
+    appmod.load_env_file(str(env))
+    assert appmod.env_api_key() == "from-shell"
+
+
+def test_suggest_fill_requires_key_for_remote_provider(
+        client, isolated_settings, monkeypatch):
+    import app as appmod
+    for name in appmod.KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(appmod, "_runtime_api_key", "")
+    called = {}
+    monkeypatch.setattr(appmod.requests, "post",
+                        lambda *a, **k: called.setdefault("hit", True))
+    resp = client.post("/api/suggest-fill", json={
+        "cv_text": "John Doe",
+        "fields": [{"key": "f0", "label": "Full name"}],
+        "provider": {"base_url": "https://openrouter.ai/api/v1", "model": "m"},
+    })
+    assert resp.status_code == 400
+    error = resp.get_json()["error"]
+    assert ".env" in error
+    assert "OPENROUTER_API_KEY" in error
+    assert "hit" not in called
+
+
+def test_test_provider_requires_key_for_remote_provider(
+        client, isolated_settings, monkeypatch):
+    import app as appmod
+    for name in appmod.KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(appmod, "_runtime_api_key", "")
+    called = {}
+    monkeypatch.setattr(appmod.requests, "post",
+                        lambda *a, **k: called.setdefault("hit", True))
+    resp = client.post("/api/test-provider", json={
+        "base_url": "https://openrouter.ai/api/v1", "model": "m"})
+    assert resp.status_code == 400
+    assert ".env" in resp.get_json()["error"]
+    assert "hit" not in called
+
+
+def test_suggest_fill_allows_keyless_local_provider(
+        client, isolated_settings, monkeypatch):
+    import app as appmod
+    for name in appmod.KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(appmod, "_runtime_api_key", "")
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(
+                {"values": {"f0": "John Doe"}})}}]}
+
+    monkeypatch.setattr(appmod.requests, "post", lambda *a, **k: FakeResp())
+    resp = client.post("/api/suggest-fill", json={
+        "cv_text": "John Doe",
+        "fields": [{"key": "f0", "label": "Full name"}],
+        "provider": {"base_url": "http://localhost:11434/v1",
+                     "model": "llama3"},
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["values"]["f0"] == "John Doe"
 
 
 def test_settings_post_rejects_missing_provider(client, isolated_settings):
@@ -337,7 +468,7 @@ def test_suggest_fill_uses_stored_provider_when_omitted(
         client, isolated_settings, monkeypatch):
     client.post("/api/settings", json={
         "base_url": "http://stored:8080/v1", "model": "stored-model",
-        "api_key": "", "cv_text": ""})
+        "api_key": "test-key", "cv_text": ""})
     seen = {}
 
     class FakeResp:
@@ -369,7 +500,7 @@ def test_suggest_fill_uses_stored_cv_when_omitted(
         client, isolated_settings, monkeypatch):
     client.post("/api/settings", json={
         "base_url": "http://stored:8080/v1", "model": "stored-model",
-        "api_key": "", "cv_text": "Jane Smith\njane@example.com"})
+        "api_key": "test-key", "cv_text": "Jane Smith\njane@example.com"})
     seen = {}
 
     class FakeResp:

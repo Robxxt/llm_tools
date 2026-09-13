@@ -142,7 +142,8 @@
       <label for="model">Model name</label>
       <input id="model" type="text" placeholder="llama3.1" autocomplete="off" />
       <label for="apiKey">API key <span style="font-weight:400;color:var(--muted)">(optional for Ollama)</span></label>
-      <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+      <input id="apiKey" type="password" placeholder="sk-... (never saved to disk)" autocomplete="off" />
+      <p class="hint" id="apiKeyHint" style="margin:6px 0 0">Never written to <code>settings.json</code>. For a persistent key add <code>CVFILL_API_KEY=...</code> (or <code>OPENROUTER_API_KEY</code>) to <code>backend/.env</code> and restart the backend; typing one here overrides it for this session.</p>
       <div class="row">
         <button id="testConn" type="button" class="ghost">Test connection</button>
         <button id="ollamaDefaults" type="button" class="ghost">Use Ollama defaults</button>
@@ -206,7 +207,10 @@
         const s = await readJson(await fetch("/api/settings"));
         $("baseUrl").value = s.base_url || "";
         $("model").value = s.model || "";
-        $("apiKey").value = s.api_key || "";
+        $("apiKey").value = "";
+        $("apiKey").placeholder = s.api_key_set
+          ? "•••••••• (key set for this session)"
+          : "sk-... (never saved to disk)";
         $("cvText").value = s.cv_text || "";
         const ready = s.base_url && s.model && (s.cv_text || "").trim();
         setStatus(ready ? "Settings loaded." : "Settings loaded — add a provider and your CV to get started.", ready ? "ok" : "warn");
@@ -216,18 +220,25 @@
     }
     $("save").addEventListener("click", async () => {
       setStatus("Saving…");
+      const payload = {
+        base_url: $("baseUrl").value.trim(),
+        model: $("model").value.trim(),
+        cv_text: $("cvText").value,
+      };
+      // Only send the key when the user typed one; it is never persisted.
+      const typedKey = $("apiKey").value.trim();
+      if (typedKey) payload.api_key = typedKey;
       try {
-        await readJson(await fetch("/api/settings", {
+        const saved = await readJson(await fetch("/api/settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            base_url: $("baseUrl").value.trim(),
-            model: $("model").value.trim(),
-            api_key: $("apiKey").value,
-            cv_text: $("cvText").value,
-          }),
+          body: JSON.stringify(payload),
         }));
-        setStatus("Saved.", "ok");
+        $("apiKey").value = "";
+        $("apiKey").placeholder = saved.api_key_set
+          ? "•••••••• (key set for this session)"
+          : "sk-... (never saved to disk)";
+        setStatus("Saved. The API key (if any) is kept in memory only.", "ok");
       } catch (e) {
         setStatus("Save failed: " + e.message, "err");
       }

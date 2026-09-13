@@ -23,22 +23,83 @@ from pypdf import PdfReader
 MAX_PDF_BYTES = 10 * 1024 * 1024
 MAX_FIELDS = 100
 # Only these are ever written to settings.json. The API key is deliberately
-# NOT persisted: it lives in memory for the session and can be seeded from the
-# CVFILL_API_KEY environment variable instead.
+# NOT persisted there: it is read from backend/.env (or the process
+# environment) at startup and held in memory for the session. Setting one from
+# the dashboard overrides it for the current run only.
 SETTINGS_KEYS = ("base_url", "model", "cv_text")
 ENV_API_KEY = "CVFILL_API_KEY"
-_runtime_api_key = os.environ.get(ENV_API_KEY, "").strip()
+# Accepted .env / environment variable names, most specific first.
+KEY_ENV_VARS = ("CVFILL_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+                "LLM_API_KEY")
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def load_env_file(path: str = ENV_FILE) -> None:
+    """Load KEY=VALUE lines from a .env file into os.environ (no override).
+
+    Keeps the backend dependency-free while letting users keep secrets out of
+    settings.json and shell history. Existing environment variables win.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        key = key.strip()
+        value = raw.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def env_api_key() -> str:
+    """First non-empty API key found in the environment (.env included)."""
+    for name in KEY_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+load_env_file()
+_runtime_api_key = env_api_key()
 
 
 def get_api_key() -> str:
-    """The in-memory API key (env var at startup, or set from the dashboard)."""
-    return _runtime_api_key
+    """The session API key (.env at startup, or set from the dashboard)."""
+    return _runtime_api_key or env_api_key()
 
 
 def set_api_key(value) -> str:
     global _runtime_api_key
     _runtime_api_key = str(value or "").strip()
     return _runtime_api_key
+
+
+def is_local_provider(base_url: str) -> bool:
+    """True for loopback hosts (e.g. Ollama), which need no API key."""
+    host = (urlparse(base_url or "").hostname or "").lower()
+    return host in LOCAL_HOSTS or host.endswith(".local")
+
+
+def missing_key_message(base_url: str) -> str:
+    """Actionable error when a remote provider has no API key configured."""
+    host = urlparse(base_url or "").hostname or (base_url or "provider")
+    var = "CVFILL_API_KEY"
+    if "openrouter" in host.lower():
+        var = "OPENROUTER_API_KEY"
+    elif "openai" in host.lower():
+        var = "OPENAI_API_KEY"
+    return (
+        f"No API key configured for '{host}'. Add a line to backend/.env "
+        f"(`{var}=<your-key>`) and restart the backend, or paste a key in the "
+        f"dashboard and click Save."
+    )
 
 # Only the extension UI (moz-extension://<uuid>) and the local dashboard may
 # read responses. A normal website must NOT be able to read /api/settings
@@ -342,6 +403,8 @@ def suggest_fill():
         base_url = validate_provider(base_url, model)
     except ValueError as exc:
         return jsonify({"error": f"Invalid provider: {exc}"}), 400
+    if not api_key and not is_local_provider(base_url):
+        return jsonify({"error": missing_key_message(base_url)}), 400
 
     payload = build_messages(cv_text, fields, model)
     headers = {"Content-Type": "application/json"}
@@ -374,7 +437,7 @@ def suggest_fill():
 
 @app.get("/api/settings")
 def get_settings():
-    return jsonify(load_settings())
+    return jsonify(public_settings())
 
 
 @app.post("/api/settings")
@@ -399,6 +462,8 @@ def test_provider():
         base_url = validate_provider(base_url, model)
     except ValueError as exc:
         return jsonify({"error": f"Invalid provider: {exc}"}), 400
+    if not api_key and not is_local_provider(base_url):
+        return jsonify({"error": missing_key_message(base_url)}), 400
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -434,8 +499,36 @@ def dashboard():
     return render_template("index.html")
 
 
+def strip_api_key_from_file(path: str = None) -> bool:
+    """Remove a legacy plaintext api_key from settings.json (one-time cleanup).
+
+    The key is moved into memory for the current run (unless CVFILL_API_KEY is
+    already set) and then dropped from disk. Returns True if the file changed.
+    """
+    path = path or settings_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict) or not raw.get("api_key"):
+        return False
+    if not get_api_key():
+        set_api_key(raw.get("api_key"))
+    raw.pop("api_key", None)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(raw, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        return False
+    return True
+
+
 def main() -> None:
     """Start the dev server. Honors the PORT env var (default 5000)."""
+    strip_api_key_from_file()
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="127.0.0.1", port=port)
 
