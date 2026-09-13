@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CV Job Form Filler — Backend settings</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; font-size: 14px; }
+    h1 { font-size: 20px; }
+    .hint { color: #555; font-size: 13px; }
+    label { display: block; margin: 10px 0 3px; font-weight: 600; }
+    input[type="text"], input[type="password"], textarea { width: 100%; box-sizing: border-box; padding: 7px; font-size: 14px; }
+    textarea { min-height: 160px; font-family: ui-monospace, monospace; }
+    .row { display: flex; gap: 8px; margin-top: 12px; }
+    button { padding: 8px 14px; cursor: pointer; }
+    #status { position: sticky; top: 0; background: #fff; padding: 8px 0; min-height: 20px; font-size: 13px; border-bottom: 1px solid #eee; }
+    #status.ok { color: #0a6b0a; }
+    #status.err { color: #a00; }
+  </style>
+</head>
+<body>
+  <h1>CV Job Form Filler — Backend settings</h1>
+  <p class="hint">Same settings as the Firefox extension popup. Saved to <code>settings.json</code> next to <code>app.py</code> (localhost only). The extension can pull these via “Load from backend”.</p>
+  <div id="status"></div>
+
+  <h2>Model provider (OpenAI-compatible)</h2>
+  <label for="baseUrl">API base_url</label>
+  <input id="baseUrl" type="text" placeholder="http://localhost:11434/v1" />
+  <label for="model">Model name</label>
+  <input id="model" type="text" placeholder="llama3.1" />
+  <label for="apiKey">API key (optional for Ollama)</label>
+  <input id="apiKey" type="password" placeholder="sk-..." />
+
+  <h2>CV text</h2>
+  <textarea id="cvText" placeholder="Paste CV as plain text, or parse a PDF below…"></textarea>
+  <div class="row">
+    <input id="pdfFile" type="file" accept="application/pdf" style="flex:2" />
+    <button id="uploadPdf" style="flex:1" type="button">Parse PDF</button>
+  </div>
+
+  <div class="row">
+    <button id="ollamaDefaults" type="button">Use Ollama defaults</button>
+    <button id="save" type="button"><strong>Save settings</strong></button>
+    <button id="testConn" type="button">Test connection</button>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $("status");
+    function setStatus(msg, kind) {
+      statusEl.textContent = msg || "";
+      statusEl.className = kind || "";
+    }
+    async function readJson(resp) {
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(body.error || ("HTTP " + resp.status));
+      return body;
+    }
+    async function load() {
+      try {
+        const s = await readJson(await fetch("/api/settings"));
+        $("baseUrl").value = s.base_url || "";
+        $("model").value = s.model || "";
+        $("apiKey").value = s.api_key || "";
+        $("cvText").value = s.cv_text || "";
+        setStatus("Settings loaded.", "ok");
+      } catch (e) {
+        setStatus("Could not load settings: " + e.message, "err");
+      }
+    }
+    $("save").addEventListener("click", async () => {
+      setStatus("Saving…");
+      try {
+        await readJson(await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_url: $("baseUrl").value.trim(),
+            model: $("model").value.trim(),
+            api_key: $("apiKey").value,
+            cv_text: $("cvText").value,
+          }),
+        }));
+        setStatus("Saved.", "ok");
+      } catch (e) {
+        setStatus("Save failed: " + e.message, "err");
+      }
+    });
+    $("ollamaDefaults").addEventListener("click", () => {
+      $("baseUrl").value = "http://localhost:11434/v1";
+      if (!$("model").value) $("model").value = "llama3.1";
+    });
+    $("testConn").addEventListener("click", async () => {
+      setStatus("Testing provider (may take a while on cold Ollama models)…");
+      try {
+        const body = await readJson(await fetch("/api/test-provider", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_url: $("baseUrl").value.trim(),
+            model: $("model").value.trim(),
+            api_key: $("apiKey").value,
+          }),
+        }));
+        setStatus("Model reachable, reply: " + JSON.stringify(body.reply), "ok");
+      } catch (e) {
+        setStatus("Connection failed: " + e.message + " — is Ollama running? Did you pull the model?", "err");
+      }
+    });
+    $("uploadPdf").addEventListener("click", async () => {
+      const file = $("pdfFile").files[0];
+      if (!file) { setStatus("Choose a PDF first.", "err"); return; }
+      setStatus("Parsing PDF…");
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const body = await readJson(await fetch("/api/parse-pdf", { method: "POST", body: form }));
+        $("cvText").value = body.text || "";
+        if (!$("cvText").value.trim()) {
+          setStatus("PDF parsed but no text found (scanned/image PDF?). Paste the CV text manually, then Save.", "err");
+        } else {
+          setStatus("PDF parsed (" + $("cvText").value.length + " chars). Review, then Save.", "ok");
+        }
+      } catch (e) {
+        setStatus("PDF parse failed: " + e.message, "err");
+      }
+    });
+    load();
+  </script>
+</body>
+</html>

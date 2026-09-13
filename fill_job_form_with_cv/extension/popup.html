@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CV Job Form Filler</title>
+  <style>
+    body { font-family: system-ui, sans-serif; width: 380px; margin: 0; padding: 12px; font-size: 13px; }
+    h2 { font-size: 14px; margin: 12px 0 6px; }
+    h1 { font-size: 15px; margin: 0 0 4px; }
+    .hint { color: #555; font-size: 12px; margin-bottom: 8px; }
+    label { display: block; margin: 6px 0 2px; font-weight: 600; }
+    input[type="text"], input[type="password"], textarea, select {
+      width: 100%; box-sizing: border-box; padding: 6px; font-size: 13px;
+    }
+    textarea { min-height: 90px; resize: vertical; }
+    .row { display: flex; gap: 6px; margin-top: 8px; }
+    button { flex: 1; padding: 7px; cursor: pointer; }
+    button.primary { font-weight: 700; }
+    #status { position: sticky; top: 0; background: #fff; padding: 6px 0; margin-top: 0; min-height: 18px; font-size: 12px; border-bottom: 1px solid #eee; z-index: 1; }
+    #status.ok { color: #0a6b0a; }
+    #status.err { color: #a00; }
+    .req { color: #a00; font-weight: 700; }
+    .skip { background: #f7f7f7; border: 1px solid #e2e2e2; padding: 6px; margin-top: 6px; font-size: 12px; color: #444; }
+    table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+    td, th { border: 1px solid #ddd; padding: 4px; vertical-align: top; }
+    th { background: #f4f4f4; text-align: left; }
+    .dropped { color: #a00; font-size: 12px; }
+    .safety { background: #f7f7f7; border: 1px solid #e2e2e2; padding: 6px; font-size: 12px; color: #444; }
+  </style>
+</head>
+<body>
+  <h1>CV Job Form Filler</h1>
+  <div id="status" role="status"></div>
+  <div class="hint">Verbatim-only: the model may only copy-paste from your CV. Anything not found stays empty. Nothing is filled or submitted without your click.</div>
+
+  <h2>1. Model backend</h2>
+  <label for="backendUrl">Flask backend URL</label>
+  <input id="backendUrl" type="text" value="http://127.0.0.1:5000" />
+  <div class="row">
+    <button id="testConn" type="button">Test connection</button>
+    <button id="loadBackend" type="button">Load from backend</button>
+  </div>
+
+  <label for="preset">Provider preset</label>
+  <select id="preset">
+    <option value="ollama">Ollama (local)</option>
+    <option value="custom">Custom OpenAI-compatible API</option>
+  </select>
+
+  <label for="baseUrl">API base_url</label>
+  <input id="baseUrl" type="text" value="http://localhost:11434/v1" />
+
+  <label for="model">Model name</label>
+  <input id="model" type="text" value="llama3.1" />
+
+  <label for="apiKey">API key (custom provider only, optional for Ollama)</label>
+  <input id="apiKey" type="password" placeholder="sk-..." />
+
+  <h2>2. Your CV</h2>
+  <textarea id="cvText" placeholder="Paste your CV as plain text…"></textarea>
+  <div class="row">
+    <input id="pdfFile" type="file" accept="application/pdf" style="flex:2" />
+    <button id="uploadPdf" style="flex:1">Parse PDF</button>
+  </div>
+  <div class="row">
+    <button id="saveAll">Save settings + CV</button>
+  </div>
+
+  <h2>3. Fill this page</h2>
+  <div class="safety">Safe mode: only scans on “Scan”, only fills checked fields on “Fill”. Never auto-submits, never touches CAPTCHAs or passwords.</div>
+  <div class="row">
+    <button id="scan">Scan this page</button>
+    <button id="suggest" class="primary">Suggest from CV</button>
+  </div>
+  <div id="fields"></div>
+  <div id="skipped"></div>
+  <div id="dropped"></div>
+  <div class="row">
+    <button id="fill" class="primary">Fill checked fields</button>
+  </div>
+
+  <script src="verbatim.js"></script>
+  <script src="content.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
