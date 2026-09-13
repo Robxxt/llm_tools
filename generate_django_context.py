@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Generate layered, token-efficient AST context maps for Django projects.
 
-Layering (hallucination reduction + token saving):
-  L0 (root ``django_llm_context.md``): project fingerprint — stack, Django apps,
-      aggregated route table (route -> view -> file:lines), dependency edges,
-      file index with 1-line purpose + symbol counts. NO full signatures.
-  L1 (per-app ``django_llm_context.md``): precise symbols — full typed
-      signatures, model fields with key kwargs, view/viewset config,
-      decorators, imports, exact ``file:lines`` anchors.
+Layering (mirrors generate_flutter_context.py):
+  L0 (root ``django_llm_context.md``): project overview only — dependencies,
+      Django apps, sub-folder links, and a file index with 1-line purpose
+      + LOC. NO full signatures, NO per-symbol details.
+  L1 (per-folder ``django_llm_context.md``): precise symbols for the files
+      in THAT folder only — full typed signatures, model fields with key
+      kwargs, view/viewset config, decorators, imports, exact
+      ``file:lines`` anchors. The root file also carries an L1 section for
+      root-level files so no file is orphaned.
 
 Accuracy rules:
   - Never drop architecturally load-bearing Django hooks (``get_queryset``,
@@ -34,7 +36,6 @@ IGNORE_DIRS = {
     "node_modules", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     "htmlcov", "__snapshots__",
 }
-IGNORE_FILES = {"__init__.py"}  # handled specially: indexed, collapsed if empty
 IGNORE_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".svg", ".ico",
     ".sqlite3", ".db", ".pyc", ".pyo", ".css", ".js", ".map",
@@ -56,7 +57,7 @@ ARCH_HOOKS = {
 
 MAX_EXPR_CHARS = 180   # verbatim expr budget per field/attr (token cap)
 MAX_DOC_CHARS = 140
-MAX_ROUTES_ROOT = 200  # safety cap for giant projects
+MAX_PURPOSE_CHARS = 140
 
 SETTINGS_KEYS = {
     "INSTALLED_APPS", "MIDDLEWARE", "AUTH_USER_MODEL", "ROOT_URLCONF",
@@ -126,10 +127,6 @@ class FileInfo:
     tasks: list[str] = field(default_factory=list)    # @shared_task sites
     error: str = ""
     loc: int = 0
-
-    @property
-    def symbol_count(self) -> int:
-        return len(self.classes) + len(self.functions) + len(self.routes)
 
 
 # ---------------------------------------------------------------- rendering helpers
@@ -211,7 +208,7 @@ def _class_kind(name: str, bases: str, filename: str, decorators: list[str]) -> 
         return "Test"
     if any(t in b for t in ("viewset", "modelviewset", "readonlymodelviewset", "genericviewset")):
         return "ViewSet"
-    if "view" in b or "api" in b and "view" in b:
+    if "view" in b:
         return "View"
     if "serializer" in b:
         return "Serializer"
@@ -361,6 +358,57 @@ def parse_settings(tree: ast.Module) -> dict[str, str]:
     return found
 
 
+def _summarize_purpose(info: FileInfo, module_doc: str) -> str:
+    """One-line purpose covering ALL top-level symbols, not just the first.
+
+    Priority: module docstring > grouped symbol summary > filename hint.
+    Returns "" when nothing meaningful can be said (caller renders "—").
+    """
+    if module_doc:
+        return module_doc
+    if info.error:
+        return ""
+    parts: list[str] = []
+    if info.classes:
+        # Group class names by kind so multi-class files read well:
+        # "Models: A, B" instead of "Defines Model `A`".
+        by_kind: dict[str, list[str]] = {}
+        for c in info.classes.values():
+            by_kind.setdefault(c.kind, []).append(c.name)
+        # Stable order: most Django-relevant kinds first.
+        order = ["Model", "ViewSet", "View", "Serializer", "Form", "Admin",
+                 "Middleware", "Command", "Task", "Signal", "Test", "Class"]
+        chunks: list[str] = []
+        for kind in order + sorted(set(by_kind) - set(order)):
+            names = by_kind.get(kind)
+            if not names:
+                continue
+            shown = ", ".join(names[:6]) + ("…" if len(names) > 6 else "")
+            label = kind + ("s" if len(names) > 1 else "")
+            chunks.append(f"{label}: {shown}")
+        if chunks:
+            parts.append(" | ".join(chunks))
+    if info.functions:
+        fnames = [f.sig.split("(")[0] for f in info.functions]
+        shown = ", ".join(fnames[:6]) + ("…" if len(fnames) > 6 else "")
+        parts.append(f"Functions: {shown}")
+    if info.routes and not info.classes and not info.functions:
+        # urls.py / router files with no other symbols.
+        parts.append(f"URLconf: {len(info.routes)} route(s)")
+    elif info.routes and (info.classes or info.functions):
+        parts.append(f"{len(info.routes)} route(s)")
+    if info.settings and not parts:
+        parts.append(f"Settings: {', '.join(sorted(info.settings)[:6])}")
+    if not parts and info.signals:
+        parts.append(f"Signals: {len(info.signals)} receiver(s)")
+    if not parts and info.tasks:
+        parts.append(f"Tasks: {', '.join(info.tasks[:4])}")
+    purpose = " · ".join(parts)
+    if len(purpose) > MAX_PURPOSE_CHARS:
+        purpose = purpose[: MAX_PURPOSE_CHARS - 1] + "…"
+    return purpose
+
+
 def parse_python_file(abs_path: Path, rel_path: Path) -> FileInfo:
     info = FileInfo(abs_path=abs_path, rel_path=rel_path)
     try:
@@ -378,7 +426,7 @@ def parse_python_file(abs_path: Path, rel_path: Path) -> FileInfo:
         info.error = str(e)
         return info
 
-    info.purpose = _first_doc_line(tree) or ""
+    module_doc = _first_doc_line(tree)
     info.imports_internal, info.imports_external = parse_imports(tree)
     if abs_path.name in ("settings.py", "base.py", "local.py", "production.py"):
         info.settings = parse_settings(tree)
@@ -401,8 +449,6 @@ def parse_python_file(abs_path: Path, rel_path: Path) -> FileInfo:
                     info.signals.append(f"{node.name} <- {ds}")
                 if "shared_task" in ds or "task" in ds:
                     info.tasks.append(node.name)
-            if not info.purpose and node.name not in BOILERPLATE_METHODS:
-                info.purpose = f"Defines function `{node.name}`"
         elif isinstance(node, ast.ClassDef):
             decs = [_decorator_str(d) for d in node.decorator_list]
             bases = [_unparse(b, limit=60) for b in node.bases]
@@ -453,8 +499,6 @@ def parse_python_file(abs_path: Path, rel_path: Path) -> FileInfo:
                     if "action" in ds_all or "shared_task" in ds_all:
                         info.tasks.append(f"{node.name}.{stmt.name}")
             info.classes[node.name] = cls
-            if not info.purpose:
-                info.purpose = f"Defines {kind} `{node.name}`"
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             # router.register(...) / admin.site.register(...) / app_name assignments
             val = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
@@ -466,8 +510,7 @@ def parse_python_file(abs_path: Path, rel_path: Path) -> FileInfo:
                         view=_unparse(val.args[1], limit=80) if len(val.args) > 1 else fn,
                         start=getattr(val, "lineno", 0),
                     ))
-    if not info.purpose and not info.error:
-        info.purpose = "(structural only — no docstring)"
+    info.purpose = _summarize_purpose(info, module_doc)
     return info
 
 
@@ -483,10 +526,8 @@ def find_python_files(root: Path) -> list[tuple[Path, Path]]:
             if any(fn.endswith(e) for e in IGNORE_EXTS):
                 continue
             abs_p = Path(dirpath) / fn
-            # Skip generated context files themselves
-            if abs_p.name == CONTEXT_FILENAME.replace(".md", ".py"):
-                continue
-            if abs_p.name == CONTEXT_FILENAME:
+            # Skip a python file that would collide with the context basename
+            if abs_p.name == Path(CONTEXT_FILENAME).stem + ".py":
                 continue
             files.append((abs_p, abs_p.relative_to(root)))
     files.sort(key=lambda x: str(x[1]))
@@ -512,15 +553,13 @@ def _anchor(rel: Path, start: int, end: int) -> str:
 
 
 def render_file_detail(info: FileInfo) -> str:
-    """L1: precise per-file symbol map."""
+    """L1: precise per-file symbol map for ONE file. No filler, no counters."""
     out = [f"### `{info.rel_path}`"]
     if info.error:
         return "\n".join(out + [f"_parse error: {info.error}_", ""])
-    # Collapse empty __init__.py to one line (token saving)
-    if info.abs_path.name == "__init__.py" and not info.classes and not info.functions and not info.routes:
-        return "\n".join(out + ["_(package marker — no symbols)_", ""])
     if info.purpose:
         out.append(f"_{info.purpose}_")
+    out.append("")
     if info.imports_internal or info.imports_external:
         imps = info.imports_internal + [f"ext:{e}" for e in info.imports_external]
         out.append(f"imports: `{'; '.join(imps[:10])}`" + ("…" if len(imps) > 10 else ""))
@@ -528,10 +567,10 @@ def render_file_detail(info: FileInfo) -> str:
         out.append("**Settings:**")
         for k, v in info.settings.items():
             out.append(f"  - `{k} = {v}`")
-    out.append("")
+    if info.imports_internal or info.imports_external or info.settings:
+        out.append("")
     for name, c in info.classes.items():
-        tag = f" [{c.kind}]" if c.kind != "Class" else ""
-        out.append(f"**{c.kind}: {name}**{c.bases}{tag} *({_anchor(info.rel_path, c.start, c.end)})*")
+        out.append(f"**{c.kind}: {name}**{c.bases} *({_anchor(info.rel_path, c.start, c.end)})*")
         if c.doc:
             out.append(f"  - _{c.doc}_")
         for d in c.decorators:
@@ -573,68 +612,64 @@ def render_file_detail(info: FileInfo) -> str:
     if info.tasks:
         out.append(f"**Tasks:** `{'; '.join(info.tasks)}`")
         out.append("")
-    if not (info.classes or info.functions or info.routes or info.settings):
-        out.append("_(no significant domain declarations detected)_")
-        out.append("")
-    return "\n".join(out)
+    return "\n".join(out).rstrip() + "\n"
 
 
 def build_root_md(root: Path, dep_text: str, infos: list[FileInfo],
                   groups: dict[Path, list[FileInfo]]) -> str:
-    """L0: overview only — counts + route table + index. No full signatures."""
+    """L0: project overview only — files + total LOC + purposes. No signatures."""
     out = ["# Django LLM Context — Project Overview", "",
-           "> Layered AST map. L0 = this index (read first). "
-           "L1 = per-app `django_llm_context.md` files with exact signatures + `file:lines` anchors. "
-           "Always open the anchored source before editing — never guess APIs from names.", ""]
+           "> Auto-generated map of the codebase. Read this file for the big picture, "
+           "then open the `django_llm_context.md` inside the relevant sub-folder for "
+           "detailed class/method signatures. This avoids loading whole source files.", ""]
     out += ["## Dependencies", "", dep_text, "", "---", ""]
-    n_cls = sum(len(i.classes) for i in infos)
-    n_fn = sum(len(i.functions) for i in infos)
-    n_routes = sum(len(i.routes) for i in infos)
-    est_tok = sum(i.loc for i in infos) * 4 // 3  # rough source-token scale for reference
-    out += ["## Project fingerprint", "",
-            f"- files: `{len(infos)}` · classes: `{n_cls}` · functions: `{n_fn}` · routes: `{n_routes}`",
-            f"- source LOC (indexed .py): `~{sum(i.loc for i in infos)}` (~{est_tok} src tokens; this map is a fraction of that)",
-            ""]
-    # Django apps detected
+    total_loc = sum(i.loc for i in infos)
+    out += ["## Architecture & File Index", "",
+            "Each entry lists the file and a one-line purpose. "
+            "Detailed symbols live in the sub-folder context files linked below.", "",
+            f"Total: `{len(infos)}` file(s), `~{total_loc}` lines (indexed .py)", ""]
+    # Django apps detected (project-level, not per-symbol detail)
     apps = sorted(str(p) for p, fl in groups.items()
                   if str(p) != "." and is_django_app(p, [(f.abs_path, f.rel_path) for f in fl]))
     if apps:
-        out += ["## Django apps", ""]
+        out += ["### Django apps", ""]
         out += [f"- `{a}/` -> `{a}/{CONTEXT_FILENAME}`" for a in apps]
         out.append("")
-    out += ["## App context maps", ""]
+    out += ["### Sub-folder context files", ""]
     for parent in sorted(groups.keys(), key=str):
-        label = str(parent) if str(parent) != "." else "root"
-        link = f"{parent}/{CONTEXT_FILENAME}" if str(parent) != "." else CONTEXT_FILENAME
-        out.append(f"- [`{label}/`]({link}) — {len(groups[parent])} file(s)")
+        if str(parent) == ".":
+            continue
+        out.append(f"- [`{parent}/`]({parent}/{CONTEXT_FILENAME}) — {len(groups[parent])} file(s)")
+    if not any(str(p) != "." for p in groups):
+        out.append("- (all files live at the project root — see symbol details below)")
     out.append("")
-    # Aggregated route table (hallucination reduction: single source of truth)
-    all_routes = [(i, r) for i in infos for r in i.routes][:MAX_ROUTES_ROOT]
-    if all_routes:
-        out += ["## Route table (route -> view)", ""]
-        for i, r in sorted(all_routes, key=lambda t: t[1].pattern):
-            nm = f" [{r.name}]" if r.name else ""
-            out.append(f"- `{r.pattern or '(router)'}` -> `{r.view}`{nm} *({i.rel_path}:{r.start})*")
-        out.append("")
-    out += ["## File index", ""]
+    out += ["### File index", ""]
     for i in infos:
         purpose = i.purpose or "—"
-        counts = f"C:{len(i.classes)} F:{len(i.functions)} R:{len(i.routes)}"
         flag = f" ⚠️{i.error}" if i.error else ""
-        out.append(f"- `{i.rel_path}` — {purpose} `[{counts}]`{flag}")
+        out.append(f"- `{i.rel_path}` — {purpose} (~{i.loc} lines){flag}")
     out.append("")
+    # L1 details for root-level files only — so no file is orphaned.
+    # Sub-folder files are detailed in their own folder's context file.
+    root_infos = groups.get(Path("."), [])
+    if root_infos:
+        out += ["---", "", "## Symbol details (root folder only)", "",
+                "> Detailed symbols for files in this folder only. "
+                "For other folders, open their own `django_llm_context.md`.", ""]
+        for i in root_infos:
+            out.append(render_file_detail(i))
     return "\n".join(out)
 
 
 def build_subfolder_md(parent: Path, infos: list[FileInfo]) -> str:
-    title = str(parent) if str(parent) != "." else "root"
-    out = [f"# Django LLM Context — Module: `{title}`", "",
-           "> L1 precise map. Symbol params + `file:lines` anchors below are authoritative. "
-           "Open the anchor before editing.", "",
-           "## Files", ""]
+    """L1: detailed symbol map for the files in THIS folder only."""
+    title = str(parent)
+    out = [f"# Django LLM Context — `{title}`", "",
+           "> Detailed symbol map for this folder. Refer here before opening source files.", "",
+           "## Files in this folder", ""]
     for i in infos:
-        out.append(f"- `{i.abs_path.name}` — {i.purpose or '—'} `[C:{len(i.classes)} F:{len(i.functions)} R:{len(i.routes)}]`")
-    out += ["", "---", "", "## Symbols", ""]
+        out.append(f"- [`{i.abs_path.name}`]({i.abs_path.name}) — {i.purpose or '—'} (~{i.loc} lines)")
+    out += ["", "---", "", "## Symbol details", ""]
     for i in infos:
         out.append(render_file_detail(i))
     return "\n".join(out)
@@ -738,7 +773,9 @@ def main(argv: list[str] | None = None) -> int:
     root_out, sub_outs = generate_context(args.root, filename=args.filename)
     print(f"✅ Root context: {root_out}")
     for p in sub_outs:
-        print(f"   ↳ App context: {p}")
+        print(f"   ↳ sub-folder context: {p}")
+    print(f"\n📋 Open {args.filename} at the project root for the overview, "
+          "and the ones inside each sub-folder for detailed symbols.")
     return 0
 
 
