@@ -669,3 +669,129 @@ def test_settings_post_rejects_bad_base_url(client, isolated_settings):
         "base_url": "file:///etc/passwd", "model": "m",
         "api_key": "", "cv_text": ""})
     assert resp.status_code == 400
+
+
+# ---------- language-proficiency select mapping ----------
+
+SHOT_OPTIONS = ["-- Please select --", "C2 (Verhandlungssicher)",
+                "C1 (Fließend)", "B2 (Fortgeschritten)",
+                "A1-B1 (Grundkenntnisse)", "Keine"]
+SHOT_CV = ("Robert-Marian Dragan\nC1\nB2\nNATIVE\nNATIVE\nA1\n"
+           "English (US)\nGerman\nSpanish\nRomanian\nFrench")
+
+
+def test_parse_cv_languages_column_style():
+    from app import parse_cv_languages
+    assert parse_cv_languages(SHOT_CV) == {
+        "english": "C1", "german": "B2", "spanish": "NATIVE",
+        "romanian": "NATIVE", "french": "A1"}
+
+
+def test_parse_cv_languages_inline_pairs_each_language():
+    from app import parse_cv_languages
+    assert parse_cv_languages("Languages: English C1, German B2, French A1") == {
+        "english": "C1", "german": "B2", "french": "A1"}
+
+
+def test_validate_values_maps_bare_cefr_to_composite_option():
+    fields = [{"key": "f0", "label": "Deutsch-Kenntnisse",
+               "type": "select", "options": SHOT_OPTIONS}]
+    cleaned, dropped = validate_values({"f0": "B2"}, SHOT_CV, fields)
+    assert cleaned["f0"] == "B2 (Fortgeschritten)"
+    assert dropped == []
+
+
+def test_validate_values_accepts_correct_composite_option():
+    fields = [{"key": "f0", "label": "Deutsch-Kenntnisse",
+               "type": "select", "options": SHOT_OPTIONS}]
+    cleaned, dropped = validate_values({"f0": "B2 (Fortgeschritten)"},
+                                       SHOT_CV, fields)
+    assert cleaned["f0"] == "B2 (Fortgeschritten)"
+    assert dropped == []
+
+
+def test_validate_values_auto_resolves_empty_language_level():
+    fields = [{"key": "f0", "label": "Deutsch-Kenntnisse",
+               "type": "select", "options": SHOT_OPTIONS}]
+    cleaned, dropped = validate_values({"f0": ""}, SHOT_CV, fields)
+    assert cleaned["f0"] == "B2 (Fortgeschritten)"
+    assert dropped == []
+
+
+def test_validate_values_corrects_confused_language_level():
+    # Model copying English C1 into the German field is corrected to the
+    # CV-derived German B2 option (still CV-grounded, not hallucinated).
+    fields = [{"key": "f0", "label": "Deutsch-Kenntnisse",
+               "type": "select", "options": SHOT_OPTIONS}]
+    cleaned, _ = validate_values({"f0": "C1 (Fließend)"}, SHOT_CV, fields)
+    assert cleaned["f0"] == "B2 (Fortgeschritten)"
+
+
+def test_validate_values_maps_cefr_to_descriptive_words():
+    fields = [{"key": "f0", "label": "German proficiency",
+               "type": "select",
+               "options": ["Native", "Fluent", "Professional",
+                           "Intermediate", "Basic"]}]
+    cleaned, dropped = validate_values({"f0": "B2"}, SHOT_CV, fields)
+    assert cleaned["f0"] == "Professional"
+    assert dropped == []
+    cleaned, _ = validate_values({"f0": ""}, SHOT_CV, fields)
+    assert cleaned["f0"] == "Professional"
+
+
+def test_validate_values_split_language_and_level_fields():
+    fields = [{"key": "f0", "label": "Language", "type": "select",
+               "options": ["English", "German", "French"]},
+              {"key": "f1", "label": "Level", "type": "select",
+               "options": ["Native", "Fluent", "Intermediate", "Basic"]}]
+    cleaned, dropped = validate_values({"f0": "German", "f1": "B2"},
+                                       SHOT_CV, fields)
+    assert cleaned["f0"] == "German"
+    # B2 has no exact word option; closest is Fluent (C1)
+    assert cleaned["f1"] == "Fluent"
+    assert dropped == []
+    cleaned, _ = validate_values({"f0": "German", "f1": ""}, SHOT_CV, fields)
+    assert cleaned["f1"] == "Fluent"
+
+
+def test_validate_values_language_name_synonym_needs_cv_evidence():
+    fields = [{"key": "f0", "label": "Sprache", "type": "select",
+               "options": ["Deutsch", "Englisch", "Französisch"]}]
+    cleaned, _ = validate_values({"f0": "German"}, SHOT_CV, fields)
+    assert cleaned["f0"] == "Deutsch"
+    # A language the CV never mentions must not slip through.
+    fields_it = [{"key": "f0", "label": "Sprache", "type": "select",
+                  "options": ["Deutsch", "Italienisch"]}]
+    cleaned, dropped = validate_values({"f0": "Italienisch"}, SHOT_CV,
+                                       fields_it)
+    assert cleaned["f0"] == ""
+    assert dropped == ["f0"]
+
+
+def test_validate_values_unknown_language_level_stays_empty():
+    fields = [{"key": "f0", "label": "Italian proficiency",
+               "type": "select",
+               "options": ["Native", "Fluent", "Intermediate", "Basic"]}]
+    cleaned, dropped = validate_values({"f0": ""}, SHOT_CV, fields)
+    assert cleaned["f0"] == ""
+    assert dropped == []
+    cleaned, dropped = validate_values({"f0": "Fluent"}, SHOT_CV, fields)
+    assert cleaned["f0"] == ""
+    assert dropped == ["f0"]
+
+
+def test_validate_values_native_cv_falls_back_to_top_option():
+    fields = [{"key": "f0", "label": "Spanish level", "type": "select",
+               "options": SHOT_OPTIONS}]
+    cleaned, _ = validate_values({"f0": ""}, SHOT_CV, fields)
+    # CV Spanish is NATIVE; closest available option is C2.
+    assert cleaned["f0"] == "C2 (Verhandlungssicher)"
+
+
+def test_validate_values_non_language_selects_stay_strict():
+    fields = [{"key": "f0", "label": "Work auth",
+               "type": "select", "options": ["Yes", "No"]}]
+    cleaned, dropped = validate_values({"f0": "Maybe"},
+                                       "Work auth: EU citizen", fields)
+    assert cleaned["f0"] == ""
+    assert dropped == ["f0"]

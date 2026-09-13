@@ -260,6 +260,101 @@
     return false;
   }
 
+  function asciiFold(s) {
+    try {
+      return String(s == null ? "" : s).normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "").trim().toLowerCase()
+        .replace(/\s+/g, " ");
+    } catch (e) {
+      return String(s == null ? "" : s).trim().toLowerCase();
+    }
+  }
+
+  var _LANG_ALIASES = {
+    german: ["german", "deutsch"],
+    english: ["english", "englisch"],
+    spanish: ["spanish", "spanisch", "espanol"],
+    french: ["french", "franzosisch", "francais"],
+    romanian: ["romanian", "rumanisch", "romana"],
+    italian: ["italian", "italienisch"],
+    portuguese: ["portuguese", "portugiesisch"],
+    dutch: ["dutch", "niederlandisch"],
+    polish: ["polish", "polnisch"],
+    czech: ["czech", "tschechisch"],
+    slovak: ["slovak", "slowakisch"],
+    hungarian: ["hungarian", "ungarisch"],
+    turkish: ["turkish", "turkisch"],
+    arabic: ["arabic", "arabisch"],
+    chinese: ["chinese", "chinesisch"],
+    japanese: ["japanese", "japanisch"],
+    russian: ["russian", "russisch"],
+    ukrainian: ["ukrainian", "ukrainisch"],
+  };
+  var _ALIAS_TO_CANON = {};
+  Object.keys(_LANG_ALIASES).forEach(function (canon) {
+    _LANG_ALIASES[canon].forEach(function (a) { _ALIAS_TO_CANON[a] = canon; });
+  });
+
+  function canonicalLanguageShort(text) {
+    const n = asciiFold(String(text || "").replace(/\(.*?\)/g, ""));
+    if (!n) return "";
+    const aliases = Object.keys(_ALIAS_TO_CANON).sort((a, b) => b.length - a.length);
+    for (const alias of aliases) {
+      const esc = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp("(^|[^a-z])" + esc + "([^a-z]|$)").test(n)) {
+        return _ALIAS_TO_CANON[alias];
+      }
+    }
+    return "";
+  }
+
+  // Value -> <option> matcher. The backend already maps CV CEFR levels to
+  // exact option text, but the user may hand-type a short form ("B2",
+  // "Deutsch") in the debug view, so resolve those deterministically too.
+  function findBestOption(selectEl, value) {
+    const opts = Array.from((selectEl && selectEl.options) || []);
+    if (!opts.length) return null;
+    const want = String(value == null ? "" : value).trim();
+    if (!want) return null;
+    let m = opts.find((o) => o.text === want || o.value === want);
+    if (m) return m;
+    const folded = asciiFold(want);
+    m = opts.find((o) => asciiFold(o.text) === folded || asciiFold(o.value) === folded);
+    if (m) return m;
+    // Bare CEFR code ("b2") or level word -> option containing that code.
+    const codeMatch = folded.match(/^([abc][12])$/);
+    if (codeMatch) {
+      const code = codeMatch[1];
+      m = opts.find((o) => new RegExp("\\b" + code + "\\b", "i").test(o.text || ""));
+      if (m) return m;
+    }
+    if (/^(native|muttersprache|nativ)$/.test(folded)) {
+      m = opts.find((o) => /(native|muttersprache|nativ)/i.test(o.text || ""));
+      if (m) return m;
+    }
+    if (/^(keine|kein|none|no knowledge)$/.test(folded)) {
+      m = opts.find((o) => /(keine|kein|none|no knowledge)/i.test(o.text || ""));
+      if (m) return m;
+    }
+    // Language synonym ("German" -> "Deutsch").
+    const canon = canonicalLanguageShort(want);
+    if (canon) {
+      m = opts.find((o) => canonicalLanguageShort(o.text) === canon
+        || canonicalLanguageShort(o.value) === canon);
+      if (m) return m;
+    }
+    // Normalized substring ("Fortgeschritten" -> "B2 (Fortgeschritten)").
+    if (folded.length >= 3) {
+      m = opts.find((o) => {
+        const t = asciiFold(o.text);
+        if (!t || t.startsWith("--") || t === "please select") return false;
+        return t.includes(folded) || folded.includes(t);
+      });
+      if (m) return m;
+    }
+    return null;
+  }
+
   function scanPage(doc) {
     const root = doc || (typeof document !== "undefined" ? document : null);
     if (!root) return { fields: [], skipped: [], total: 0 };
@@ -269,7 +364,17 @@
     let idx = 0;
     nodes.forEach((el) => {
       if (!el || !el.tagName) return;
-      if (isHidden(el, root)) return;
+      // Searchable dropdown widgets (like the "Deutsch-Kenntnisse" one with
+      // a search box) often hide the native <select> with display:none and
+      // render a custom UI. Filling the hidden <select> + firing change
+      // still works, so keep hidden selects that actually have options.
+      if (isHidden(el, root)) {
+        const tag = String(el.tagName || "").toUpperCase();
+        if (tag !== "SELECT") return;
+        try {
+          if (!el.options || el.options.length === 0) return;
+        } catch (e) { return; }
+      }
       const info = toInfo(el, root);
       const reason = skipReason(info);
       if (reason !== null) {
@@ -308,9 +413,7 @@
       try {
         el.focus({ preventScroll: false });
         if (el.tagName === "SELECT") {
-          const match = Array.from(el.options).find(
-            (o) => o.text === value || o.value === value
-          );
+          const match = findBestOption(el, value);
           if (!match) continue; // never invent an option
           el.value = match.value;
           el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -347,8 +450,8 @@
   } catch (e) { /* non-browser (tests) */ }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, collectCandidates, scanPage, fillPage };
+    module.exports = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, collectCandidates, scanPage, fillPage, findBestOption, canonicalLanguageShort };
   } else if (typeof window !== "undefined") {
-    window.CVFillContent = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, collectCandidates, scanPage, fillPage };
+    window.CVFillContent = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, collectCandidates, scanPage, fillPage, findBestOption, canonicalLanguageShort };
   }
 })();

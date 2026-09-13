@@ -12,8 +12,15 @@ const {
   findSectionContext,
   collectCandidates,
   scanPage,
+  findBestOption,
 } = require("../content.js");
-const { isVerbatim, validateValues } = require("../verbatim.js");
+const {
+  isVerbatim,
+  validateValues,
+  parseCvLanguages,
+  matchSelectOption,
+  isLanguageLevelField,
+} = require("../verbatim.js");
 
 // ---------- isFillable: ban-safe allowlist ----------
 
@@ -288,5 +295,141 @@ describe("scanPage", () => {
     assert.equal(fields[0].name, "fullName");
     assert.equal(skipped.length, 1);
     assert.match(skipped[0].reason, /manually/i);
+  });
+});
+
+// ---------- language-proficiency select mapping ----------
+
+const SHOT_OPTIONS = [
+  "-- Please select --",
+  "C2 (Verhandlungssicher)",
+  "C1 (Fließend)",
+  "B2 (Fortgeschritten)",
+  "A1-B1 (Grundkenntnisse)",
+  "Keine",
+];
+const SHOT_CV = [
+  "Robert-Marian Dragan", "C1", "B2", "NATIVE", "NATIVE", "A1",
+  "English (US)", "German", "Spanish", "Romanian", "French",
+].join("\n");
+
+describe("parseCvLanguages", () => {
+  it("pairs column-style level and language blocks positionally", () => {
+    assert.deepEqual(parseCvLanguages(SHOT_CV), {
+      english: "C1",
+      german: "B2",
+      spanish: "NATIVE",
+      romanian: "NATIVE",
+      french: "A1",
+    });
+  });
+  it("pairs inline language+level segments independently", () => {
+    assert.deepEqual(
+      parseCvLanguages("Languages: English C1, German B2, French A1"),
+      { english: "C1", german: "B2", french: "A1" }
+    );
+  });
+});
+
+describe("language select guard (verbatim mirror)", () => {
+  const shot = () => [{ key: "f0", label: "Deutsch-Kenntnisse", type: "select", options: SHOT_OPTIONS }];
+  it("maps a bare CEFR code to the composite option", () => {
+    const { cleaned, dropped } = validateValues({ f0: "B2" }, SHOT_CV, shot());
+    assert.equal(cleaned.f0, "B2 (Fortgeschritten)");
+    assert.deepEqual(dropped, []);
+  });
+  it("auto-resolves an empty language level from the CV", () => {
+    const { cleaned, dropped } = validateValues({ f0: "" }, SHOT_CV, shot());
+    assert.equal(cleaned.f0, "B2 (Fortgeschritten)");
+    assert.deepEqual(dropped, []);
+  });
+  it("corrects a confused level to the CV-derived option", () => {
+    const { cleaned } = validateValues({ f0: "C1 (Fließend)" }, SHOT_CV, shot());
+    assert.equal(cleaned.f0, "B2 (Fortgeschritten)");
+  });
+  it("maps CEFR to bare descriptive words", () => {
+    const fields = [{ key: "f0", label: "German proficiency", options: ["Native", "Fluent", "Professional", "Intermediate", "Basic"] }];
+    assert.equal(validateValues({ f0: "" }, SHOT_CV, fields).cleaned.f0, "Professional");
+  });
+  it("resolves split language/level pairs via the sibling field", () => {
+    const fields = [
+      { key: "f0", label: "Language", options: ["English", "German", "French"] },
+      { key: "f1", label: "Level", options: ["Native", "Fluent", "Intermediate", "Basic"] },
+    ];
+    const { cleaned, dropped } = validateValues({ f0: "German", f1: "" }, SHOT_CV, fields);
+    assert.equal(cleaned.f0, "German");
+    assert.equal(cleaned.f1, "Fluent");
+    assert.deepEqual(dropped, []);
+  });
+  it("maps language-name synonyms with CV evidence", () => {
+    const fields = [{ key: "f0", label: "Sprache", options: ["Deutsch", "Englisch", "Französisch"] }];
+    assert.equal(validateValues({ f0: "German" }, SHOT_CV, fields).cleaned.f0, "Deutsch");
+  });
+  it("leaves levels for languages missing from the CV empty", () => {
+    const fields = [{ key: "f0", label: "Italian proficiency", options: ["Native", "Fluent", "Intermediate", "Basic"] }];
+    const { cleaned, dropped } = validateValues({ f0: "Fluent" }, SHOT_CV, fields);
+    assert.equal(cleaned.f0, "");
+    assert.ok(dropped.includes("f0"));
+  });
+  it("keeps non-language selects strict", () => {
+    const { cleaned } = validateValues({ f0: "Maybe" }, "Maybe", [{ key: "f0", options: ["Yes", "No"] }]);
+    assert.equal(cleaned.f0, "");
+  });
+  it("detects proficiency option lists", () => {
+    assert.equal(isLanguageLevelField({ label: "Deutsch-Kenntnisse" }, SHOT_OPTIONS), true);
+    assert.equal(isLanguageLevelField({ label: "Work auth" }, ["Yes", "No"]), false);
+  });
+  it("matches bare model values to options for mapping", () => {
+    assert.equal(
+      matchSelectOption("B2", { label: "Deutsch-Kenntnisse", key: "f0" }, SHOT_OPTIONS, SHOT_CV),
+      "B2 (Fortgeschritten)"
+    );
+  });
+});
+
+describe("findBestOption", () => {
+  const fakeSelect = (texts) => ({ options: texts.map((t) => ({ text: t, value: t })) });
+  it("resolves bare CEFR codes to composite options", () => {
+    const m = findBestOption(fakeSelect(SHOT_OPTIONS), "B2");
+    assert.equal(m.text, "B2 (Fortgeschritten)");
+  });
+  it("resolves language synonyms", () => {
+    const m = findBestOption(fakeSelect(["Deutsch", "Englisch"]), "German");
+    assert.equal(m.text, "Deutsch");
+  });
+  it("still matches exact option text", () => {
+    const m = findBestOption(fakeSelect(SHOT_OPTIONS), "Keine");
+    assert.equal(m.text, "Keine");
+  });
+  it("returns null instead of inventing an option", () => {
+    assert.equal(findBestOption(fakeSelect(["Yes", "No"]), "Maybe"), null);
+  });
+});
+
+describe("scanPage", () => {
+  it("keeps hidden selects that back searchable dropdown widgets", () => {
+    // Searchable dropdowns hide the native <select> (display:none) and
+    // render custom UI; filling the hidden select still works.
+    const sel = fakeNode({ tag: "SELECT" });
+    sel.type = "select-one";
+    sel.name = "deutsch";
+    sel.id = "";
+    sel.className = "";
+    sel.placeholder = "";
+    sel.offsetParent = null; // hidden layout box
+    sel.options = [{ textContent: "B2 (Fortgeschritten) " }];
+    sel.getAttribute = () => null;
+    sel.closest = () => null;
+    const doc = {
+      querySelectorAll: (s) => (s === "input, textarea, select" ? [sel] : []),
+      querySelector: () => null,
+      getElementById: () => null,
+      defaultView: {
+        getComputedStyle: () => ({ display: "none", visibility: "visible" }),
+      },
+    };
+    const { fields } = scanPage(doc);
+    assert.equal(fields.length, 1);
+    assert.deepEqual(fields[0].options, ["B2 (Fortgeschritten)"]);
   });
 });
