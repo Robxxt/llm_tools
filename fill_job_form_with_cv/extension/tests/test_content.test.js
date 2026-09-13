@@ -10,6 +10,7 @@ const {
   labelTextForElement,
   isRequired,
   findSectionContext,
+  collectCandidates,
   scanPage,
 } = require("../content.js");
 const { isVerbatim, validateValues } = require("../verbatim.js");
@@ -235,6 +236,29 @@ describe("describeField", () => {
   it("omits the flag when not required", () => {
     const d = describeField({ tag: "INPUT", name: "nick" }, 0, "Nickname");
     assert.ok(!("required" in d));
+  });
+});
+
+// ---------- nested controls (shadow DOM / same-origin iframes) ----------
+
+describe("collectCandidates", () => {
+  it("descends into open shadow roots and same-origin iframes", () => {
+    const shadowInput = { tagName: "INPUT" };
+    const shadowRoot = {
+      querySelectorAll: (sel) => (sel === "input, textarea, select" ? [shadowInput] : []),
+    };
+    const host = { tagName: "DIV", shadowRoot, querySelectorAll: () => [] };
+    const frameInput = { tagName: "TEXTAREA" };
+    const frameDoc = {
+      querySelectorAll: (sel) => (sel === "input, textarea, select" ? [frameInput] : []),
+    };
+    const iframe = { tagName: "IFRAME", contentDocument: frameDoc, shadowRoot: null };
+    const root = {
+      querySelectorAll: (sel) => (sel === "input, textarea, select" ? [] : [host, iframe]),
+    };
+    const out = collectCandidates(root);
+    assert.ok(out.includes(shadowInput));
+    assert.ok(out.includes(frameInput));
   });
 });
 

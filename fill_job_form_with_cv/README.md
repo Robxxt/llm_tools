@@ -4,14 +4,14 @@ Fill job forms on any website by **copy-pasting verbatim info from your CV** usi
 
 ## How it works
 
-- **Firefox extension** (`extension/`): popup for settings + CV + preview, content script that scans/fills only on your click.
-- **Flask backend** (`backend/`): parses CV PDFs and proxies LLM calls with a strict anti-hallucination guard. The extension never talks to the LLM directly.
+- **Firefox extension** (`extension/`): minimal popup — scan, fill, optional debug view — and a content script that scans/fills only on your click. Provider + CV are configured in the backend dashboard.
+- **Flask backend** (`backend/`): parses CV PDFs, stores the provider + CV (`settings.json`), and proxies LLM calls with a strict anti-hallucination guard. The extension never talks to the LLM directly.
 
 ## Anti-hallucination design
 
 1. System prompt forces **exact-substring copying**, temperature `0`, empty string when unsure, JSON-only output.
-2. Backend `validate_values()` blanks any value that is not a verbatim (whitespace-insensitive) substring of the CV, and rejects select options not in the field's option list.
-3. The popup mirrors the same guard client-side and blocks edited values that aren't verbatim.
+2. Backend `validate_values()` blanks any value that is not a verbatim substring of the CV (multi-line descriptions are accepted when every line is verbatim, in order), and rejects select options not in the field's option list.
+3. The backend is the single source of truth: the extension sends only scanned fields, so every model value is guarded before it ever reaches the popup.
 4. Passwords, file uploads, hidden fields, and CAPTCHAs are never filled.
 
 ## Ban-safe behavior
@@ -60,24 +60,24 @@ If the browser can't reach Ollama directly, the Flask backend proxies it, so no 
 
 ## Backend dashboard (settings in the browser)
 
-Open **http://127.0.0.1:5000/** while the backend runs: same settings as the
-extension popup (provider `base_url` + model + API key, CV text, PDF upload)
-plus a **Test connection** button. Saved to `backend/settings.json`
-(localhost only, git-ignored — it may hold your API key). The extension can
-pull these via **Load from backend**; if a suggest request omits the provider,
-the backend falls back to the stored settings.
+Open **http://127.0.0.1:5000/** while the backend runs: set the provider
+`base_url` + model + API key, paste/upload the CV, and use **Test connection**.
+Saved to `backend/settings.json` (localhost only, git-ignored — it may hold your
+API key). The dashboard has a **dark/light theme toggle** (follows your system
+preference by default). This is the only place you configure things: the
+extension sends just the scanned fields and the backend falls back to the stored
+provider **and** stored CV.
 
 ## Load the extension in Firefox
 
 1. Open `about:debugging#/runtime/this-firefox`.
 2. Click **Load Temporary Add-on**, select `extension/manifest.json`.
-3. Open the toolbar popup:
-   - Set backend URL (default `http://127.0.0.1:5000`).
-   - Pick **Ollama (local)** or **Custom OpenAI-compatible API**, enter `base_url`, model, optional API key.
-   - Paste CV text or upload a PDF (parsed via backend), then **Save**.
-   - On a job page: **Scan this page** → **Suggest from CV** → review/edit checkboxes → **Fill checked fields** → submit manually.
-   - **Test connection** checks backend reachability *and* the model (catches Ollama-down / wrong-model-name issues).
-   - Values you type by hand bypass the verbatim guard (your own data, not model output); untouched model suggestions are still guarded.
+3. Configure the provider and CV once on **http://127.0.0.1:5000/** (gear
+   button in the popup opens it), then use the popup on a job page:
+   - **Scan this page** — finds the fields and asks the model for verbatim values in one go.
+   - **Fill form** — fills every selected, non-empty value; then submit manually.
+   - **Show fields** (debug, collapsed by default) — inspect/edit the scanned
+     fields, tick/untick which ones to fill, and see dropped or skipped fields.
    - File uploads, passwords, and CAPTCHAs are listed under “Not filled automatically” — handle those manually.
 
 ## Troubleshooting “empty suggestions / nothing to fill”

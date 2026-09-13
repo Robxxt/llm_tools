@@ -22,7 +22,23 @@ from pypdf import PdfReader
 
 MAX_PDF_BYTES = 10 * 1024 * 1024
 MAX_FIELDS = 100
-SETTINGS_KEYS = ("base_url", "model", "api_key", "cv_text")
+# Only these are ever written to settings.json. The API key is deliberately
+# NOT persisted: it lives in memory for the session and can be seeded from the
+# CVFILL_API_KEY environment variable instead.
+SETTINGS_KEYS = ("base_url", "model", "cv_text")
+ENV_API_KEY = "CVFILL_API_KEY"
+_runtime_api_key = os.environ.get(ENV_API_KEY, "").strip()
+
+
+def get_api_key() -> str:
+    """The in-memory API key (env var at startup, or set from the dashboard)."""
+    return _runtime_api_key
+
+
+def set_api_key(value) -> str:
+    global _runtime_api_key
+    _runtime_api_key = str(value or "").strip()
+    return _runtime_api_key
 
 # Only the extension UI (moz-extension://<uuid>) and the local dashboard may
 # read responses. A normal website must NOT be able to read /api/settings
@@ -91,27 +107,38 @@ def load_settings() -> dict:
     return data
 
 
+def public_settings() -> dict:
+    """Settings safe to send to the UI: never includes the API key itself."""
+    data = load_settings()
+    data["api_key_set"] = bool(get_api_key())
+    return data
+
+
 def save_settings(payload: dict) -> dict:
-    """Validate and persist settings. Only known keys are stored."""
+    """Validate and persist settings. The API key is never written to disk."""
     if not isinstance(payload, dict):
         raise ValueError("Settings must be a JSON object")
     base_url = str(payload.get("base_url", "")).strip()
     model = str(payload.get("model", "")).strip()
-    api_key = payload.get("api_key", "")
     cv_text = payload.get("cv_text", "")
     if not base_url or not model:
         raise ValueError("base_url and model are required")
-    if not isinstance(api_key, str) or not isinstance(cv_text, str):
-        raise ValueError("api_key and cv_text must be strings")
+    if not isinstance(cv_text, str):
+        raise ValueError("cv_text must be a string")
+    if "api_key" in payload:
+        api_key = payload.get("api_key", "")
+        if not isinstance(api_key, str):
+            raise ValueError("api_key must be a string")
+        if api_key.strip():
+            set_api_key(api_key)
     base_url = validate_provider(base_url, model)
-    data = {"base_url": base_url, "model": model,
-            "api_key": api_key, "cv_text": cv_text}
+    data = {"base_url": base_url, "model": model, "cv_text": cv_text}
     path = settings_path()
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
-    return data
+    return public_settings()
 
 
 def validate_provider(base_url: str, model: str) -> str:
@@ -261,7 +288,10 @@ def _extract_json_object(text: str) -> dict:
 
 @app.get("/api/health")
 def health():
-    return jsonify({"status": "ok"})
+    stored = load_settings()
+    configured = bool(stored["base_url"] and stored["model"]
+                      and stored["cv_text"].strip())
+    return jsonify({"status": "ok", "configured": configured})
 
 
 @app.post("/api/parse-pdf")
@@ -296,10 +326,14 @@ def suggest_fill():
     base_url = ((provider.get("base_url") or "").strip()
                 or stored["base_url"]).rstrip("/")
     model = (provider.get("model") or "").strip() or stored["model"]
-    api_key = (provider.get("api_key") or "").strip() or stored["api_key"]
+    api_key = (provider.get("api_key") or "").strip() or get_api_key()
+    # The extension may omit the CV and rely on the one saved in settings.json.
+    if not cv_text:
+        cv_text = stored["cv_text"].strip()
 
     if not cv_text:
-        return jsonify({"error": "cv_text is required"}), 400
+        return jsonify({"error": "cv_text is required (save your CV in the "
+                                 "localhost:5000 dashboard)"}), 400
     if not isinstance(fields, list) or not fields:
         return jsonify({"error": "fields must be a non-empty list"}), 400
     if len(fields) > MAX_FIELDS:
@@ -360,7 +394,7 @@ def test_provider():
     base_url = (str(body.get("base_url") or "").strip()
                 or stored["base_url"]).rstrip("/")
     model = str(body.get("model") or "").strip() or stored["model"]
-    api_key = str(body.get("api_key") or "").strip() or stored["api_key"]
+    api_key = str(body.get("api_key") or "").strip() or get_api_key()
     try:
         base_url = validate_provider(base_url, model)
     except ValueError as exc:

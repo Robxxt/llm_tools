@@ -82,7 +82,7 @@ def test_parse_pdf_rejects_too_large(client):
 
 # ---------- suggest-fill validation ----------
 
-def test_suggest_fill_requires_cv_text(client):
+def test_suggest_fill_requires_cv_text(client, isolated_settings):
     resp = client.post("/api/suggest-fill", json={
         "cv_text": "",
         "fields": [{"key": "a", "label": "Full name"}],
@@ -365,12 +365,55 @@ def test_suggest_fill_uses_stored_provider_when_omitted(
     assert seen["model"] == "stored-model"
 
 
+def test_suggest_fill_uses_stored_cv_when_omitted(
+        client, isolated_settings, monkeypatch):
+    client.post("/api/settings", json={
+        "base_url": "http://stored:8080/v1", "model": "stored-model",
+        "api_key": "", "cv_text": "Jane Smith\njane@example.com"})
+    seen = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps({
+                "values": {"f0": "Jane Smith"}})}}]}
+
+    import app as appmod
+
+    def fake_post(url, **kwargs):
+        seen["content"] = kwargs["json"]["messages"][1]["content"]
+        return FakeResp()
+
+    monkeypatch.setattr(appmod.requests, "post", fake_post)
+    resp = client.post("/api/suggest-fill", json={
+        "fields": [{"key": "f0", "label": "Full name"}],
+        "provider": {"base_url": "http://stored:8080/v1",
+                     "model": "stored-model"},
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["values"]["f0"] == "Jane Smith"
+    assert "jane@example.com" in seen["content"]
+
+
+def test_health_reports_configured_state(client, isolated_settings):
+    assert client.get("/api/health").get_json()["configured"] is False
+    client.post("/api/settings", json={
+        "base_url": "http://stored:8080/v1", "model": "m",
+        "api_key": "", "cv_text": "Jane Smith"})
+    assert client.get("/api/health").get_json()["configured"] is True
+
+
 def test_dashboard_serves_html(client):
     resp = client.get("/")
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
     assert "CV Job Form Filler" in html
     assert "/api/settings" in html
+    # dark/light theme toggle is wired up
+    assert 'id="themeToggle"' in html
+    assert "data-theme" in html
+    assert "prefers-color-scheme: dark" in html
 
 
 # ---------- provider connection test ----------

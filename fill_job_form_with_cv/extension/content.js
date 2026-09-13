@@ -224,21 +224,52 @@
     return info;
   }
 
+  // Gather controls from the document, same-origin iframes and open shadow
+  // roots. Many job widgets render inside one of those, which plain
+  // querySelectorAll on the top document would miss.
+  function collectCandidates(root, out) {
+    const acc = out || [];
+    if (!root || !root.querySelectorAll) return acc;
+    try {
+      Array.from(root.querySelectorAll("input, textarea, select")).forEach((el) => acc.push(el));
+    } catch (e) { /* ignore */ }
+    let all = [];
+    try { all = Array.from(root.querySelectorAll("*")); } catch (e) { all = []; }
+    all.forEach((el) => {
+      try {
+        if (el.shadowRoot) collectCandidates(el.shadowRoot, acc);
+        if (String(el.tagName || "").toUpperCase() === "IFRAME") {
+          const inner = el.contentDocument;
+          if (inner) collectCandidates(inner, acc);
+        }
+      } catch (e) { /* cross-origin iframe / detached node */ }
+    });
+    return acc;
+  }
+
+  function isHidden(el, root) {
+    if (el.hidden || el.type === "hidden") return true;
+    try {
+      const view = (root && root.defaultView)
+        || (typeof window !== "undefined" ? window : null);
+      if (el.offsetParent === null) {
+        const style = view && view.getComputedStyle ? view.getComputedStyle(el) : null;
+        if (style && (style.display === "none" || style.visibility === "hidden")) return true;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
   function scanPage(doc) {
     const root = doc || (typeof document !== "undefined" ? document : null);
-    if (!root) return { fields: [], skipped: [] };
-    const nodes = root.querySelectorAll("input, textarea, select");
+    if (!root) return { fields: [], skipped: [], total: 0 };
+    const nodes = collectCandidates(root);
     const fields = [];
     const skipped = [];
     let idx = 0;
     nodes.forEach((el) => {
-      if (el.offsetParent === null && el.tagName !== "SELECT") {
-        // Still allow fixed-position visible fields; skip display:none.
-        try {
-          const style = root.defaultView.getComputedStyle(el);
-          if (style && (style.display === "none" || style.visibility === "hidden")) return;
-        } catch (e) { return; }
-      }
+      if (!el || !el.tagName) return;
+      if (isHidden(el, root)) return;
       const info = toInfo(el, root);
       const reason = skipReason(info);
       if (reason !== null) {
@@ -248,10 +279,10 @@
         return;
       }
       fields.push(describeField(info, idx, resolveLabel(info)));
-      el.setAttribute("data-cvfill-key", `f${idx}`);
+      try { el.setAttribute("data-cvfill-key", `f${idx}`); } catch (e) { /* ignore */ }
       idx += 1;
     });
-    return { fields, skipped };
+    return { fields, skipped, total: nodes.length };
   }
 
   function setNativeValue(el, value) {
@@ -316,8 +347,8 @@
   } catch (e) { /* non-browser (tests) */ }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, scanPage, fillPage };
+    module.exports = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, collectCandidates, scanPage, fillPage };
   } else if (typeof window !== "undefined") {
-    window.CVFillContent = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, scanPage, fillPage };
+    window.CVFillContent = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, collectCandidates, scanPage, fillPage };
   }
 })();

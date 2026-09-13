@@ -2,83 +2,137 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>CV Job Form Filler</title>
+  <title>CV Form Filler</title>
   <style>
-    body { font-family: system-ui, sans-serif; width: 380px; margin: 0; padding: 12px; font-size: 13px; }
-    h2 { font-size: 14px; margin: 12px 0 6px; }
-    h1 { font-size: 15px; margin: 0 0 4px; }
-    .hint { color: #555; font-size: 12px; margin-bottom: 8px; }
-    label { display: block; margin: 6px 0 2px; font-weight: 600; }
-    input[type="text"], input[type="password"], textarea, select {
-      width: 100%; box-sizing: border-box; padding: 6px; font-size: 13px;
+    :root {
+      --bg: #ffffff;
+      --surface: #f8fafc;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --accent-soft: #eef2ff;
+      --ok: #059669;
+      --err: #dc2626;
+      --warn: #b45309;
+      --radius: 12px;
     }
-    textarea { min-height: 90px; resize: vertical; }
-    #fields textarea { min-height: 54px; font-size: 12px; }
-    .row { display: flex; gap: 6px; margin-top: 8px; }
-    button { flex: 1; padding: 7px; cursor: pointer; }
-    button.primary { font-weight: 700; }
-    #status { position: sticky; top: 0; background: #fff; padding: 6px 0; margin-top: 0; min-height: 18px; font-size: 12px; border-bottom: 1px solid #eee; z-index: 1; }
-    #status.ok { color: #0a6b0a; }
-    #status.err { color: #a00; }
-    .req { color: #a00; font-weight: 700; }
-    .skip { background: #f7f7f7; border: 1px solid #e2e2e2; padding: 6px; margin-top: 6px; font-size: 12px; color: #444; }
-    table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-    td, th { border: 1px solid #ddd; padding: 4px; vertical-align: top; }
-    th { background: #f4f4f4; text-align: left; }
-    .dropped { color: #a00; font-size: 12px; }
-    .safety { background: #f7f7f7; border: 1px solid #e2e2e2; padding: 6px; font-size: 12px; color: #444; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1120;
+        --surface: #111827;
+        --border: #1f2937;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --accent: #818cf8;
+        --accent-hover: #a5b4fc;
+        --accent-soft: #1e1b4b;
+        --ok: #34d399;
+        --err: #f87171;
+        --warn: #fbbf24;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      width: 368px; margin: 0; padding: 14px;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px; color: var(--text); background: var(--bg);
+    }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+      font-size: 15px; font-weight: 700; color: #fff;
+      background: linear-gradient(135deg, var(--accent), #22d3ee);
+    }
+    h1 { font-size: 14px; margin: 0; letter-spacing: -0.01em; }
+    .sub { margin: 1px 0 0; color: var(--muted); font-size: 11px; }
+    .icon-btn {
+      width: 34px; height: 34px; border-radius: 10px; cursor: pointer; font-size: 15px;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    }
+    .icon-btn:hover { border-color: var(--accent); }
+
+    .status {
+      margin: 12px 0; padding: 9px 11px; border-radius: 10px; font-size: 12px;
+      border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+      min-height: 18px; line-height: 1.4;
+    }
+    .status:empty { display: none; }
+    .status.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+    .status.err { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, var(--border)); }
+    .status.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button {
+      font: inherit; font-weight: 600; padding: 10px 12px; border-radius: 10px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text);
+      transition: transform .1s ease, background .2s ease, border-color .2s ease;
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+    .meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+    .summary { color: var(--muted); font-size: 11.5px; }
+    .link-btn {
+      border: none; background: transparent; padding: 2px 4px; color: var(--accent);
+      font-size: 11.5px; text-decoration: underline; cursor: pointer;
+    }
+
+    .debug { margin-top: 10px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .debug.hidden { display: none; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { border-bottom: 1px solid var(--border); padding: 5px 6px; vertical-align: top; }
+    th { background: var(--surface); text-align: left; font-size: 11px; color: var(--muted); position: sticky; top: 0; }
+    #fields { max-height: 260px; overflow: auto; }
+    #fields input[type="text"], #fields textarea {
+      width: 100%; padding: 5px 7px; font: inherit; font-size: 12px; color: var(--text);
+      background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+    }
+    #fields textarea { min-height: 50px; resize: vertical; line-height: 1.4; }
+    #fields input[type="checkbox"] { margin-top: 3px; accent-color: var(--accent); }
+    .req { color: var(--err); font-weight: 700; }
+    .skip, .dropped { padding: 8px 10px; font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--border); }
+    .dropped { color: var(--err); }
+    .skip ul { margin: 4px 0 0; padding-left: 16px; }
+    .skip li { margin: 2px 0; }
+    .foot { margin: 12px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
   </style>
 </head>
 <body>
-  <h1>CV Job Form Filler</h1>
-  <div id="status" role="status"></div>
-  <div class="hint">Verbatim-only: the model may only copy-paste from your CV. Anything not found stays empty. Nothing is filled or submitted without your click.</div>
+  <header>
+    <div class="brand">
+      <div class="logo" aria-hidden="true">CV</div>
+      <div>
+        <h1>CV Form Filler</h1>
+        <p class="sub">Verbatim autofill from your CV</p>
+      </div>
+    </div>
+    <button id="settings" class="icon-btn" type="button" title="Open backend settings" aria-label="Open backend settings">⚙</button>
+  </header>
 
-  <h2>1. Model backend</h2>
-  <label for="backendUrl">Flask backend URL</label>
-  <input id="backendUrl" type="text" value="http://127.0.0.1:5000" />
-  <div class="row">
-    <button id="testConn" type="button">Test connection</button>
-    <button id="loadBackend" type="button">Load from backend</button>
+  <div id="status" class="status" role="status"></div>
+
+  <div class="actions">
+    <button id="scan" class="primary" type="button">Scan this page</button>
+    <button id="fill" class="primary" type="button" disabled>Fill form</button>
   </div>
 
-  <label for="preset">Provider preset</label>
-  <select id="preset">
-    <option value="ollama">Ollama (local)</option>
-    <option value="custom">Custom OpenAI-compatible API</option>
-  </select>
-
-  <label for="baseUrl">API base_url</label>
-  <input id="baseUrl" type="text" value="http://localhost:11434/v1" />
-
-  <label for="model">Model name</label>
-  <input id="model" type="text" value="llama3.1" />
-
-  <label for="apiKey">API key (custom provider only, optional for Ollama)</label>
-  <input id="apiKey" type="password" placeholder="sk-..." />
-
-  <h2>2. Your CV</h2>
-  <textarea id="cvText" placeholder="Paste your CV as plain text…"></textarea>
-  <div class="row">
-    <input id="pdfFile" type="file" accept="application/pdf" style="flex:2" />
-    <button id="uploadPdf" style="flex:1">Parse PDF</button>
-  </div>
-  <div class="row">
-    <button id="saveAll">Save settings + CV</button>
+  <div class="meta">
+    <span id="summary" class="summary">No page scanned yet.</span>
+    <button id="debugToggle" class="link-btn" type="button" aria-expanded="false">Show fields</button>
   </div>
 
-  <h2>3. Fill this page</h2>
-  <div class="safety">Safe mode: only scans on “Scan”, only fills checked fields on “Fill”. Never auto-submits, never touches CAPTCHAs or passwords.</div>
-  <div class="row">
-    <button id="scan">Scan this page</button>
-    <button id="suggest" class="primary">Suggest from CV</button>
+  <div id="debug" class="debug hidden">
+    <div id="fields"></div>
+    <div id="skipped"></div>
+    <div id="dropped"></div>
   </div>
-  <div id="fields"></div>
-  <div id="skipped"></div>
-  <div id="dropped"></div>
-  <div class="row">
-    <button id="fill" class="primary">Fill checked fields</button>
-  </div>
+
+  <p class="foot">Nothing is submitted automatically — review, then submit yourself.</p>
 
   <script src="verbatim.js"></script>
   <script src="content.js"></script>
