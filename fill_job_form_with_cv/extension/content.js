@@ -68,6 +68,7 @@
       type: String(info.type || info.tag || "text").toLowerCase(),
     };
     if (info.placeholder) desc.placeholder = info.placeholder;
+    if (info.context) desc.context = info.context;
     if (Array.isArray(info.options)) desc.options = info.options.slice(0, 200);
     if (info.required) desc.required = true;
     return desc;
@@ -164,6 +165,41 @@
     return /\*/.test(String(labelText || ""));
   }
 
+  function headingText(node) {
+    if (!node) return "";
+    const tag = String(node.tagName || "").toUpperCase();
+    const isHeading = /^H[1-6]$/.test(tag) || tag === "LEGEND"
+      || (node.getAttribute && node.getAttribute("role") === "heading");
+    if (!isHeading) return "";
+    return cleanLabel(nodeText(node)).slice(0, 120);
+  }
+
+  // Nearest heading/legend above the field. This lets the model know which
+  // CV section (e.g. "Education" vs "Professional Experience") a generic
+  // field like "Description" belongs to.
+  function findSectionContext(el, doc) {
+    try {
+      const fs = el.closest && el.closest("fieldset");
+      if (fs) {
+        const t = headingText(fs.querySelector && fs.querySelector("legend"));
+        if (t) return t;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      let node = el;
+      for (let depth = 0; depth < 6 && node; depth++) {
+        let sib = node.previousElementSibling;
+        for (let hop = 0; sib && hop < 6; hop++) {
+          const t = headingText(sib);
+          if (t) return t;
+          sib = sib.previousElementSibling;
+        }
+        node = node.parentElement;
+      }
+    } catch (e) { /* ignore */ }
+    return "";
+  }
+
   function toInfo(el, doc) {
     const tag = (el.tagName || "").toUpperCase();
     const labelText = labelTextForElement(el, doc);
@@ -176,6 +212,7 @@
       placeholder: el.placeholder || "",
       ariaLabel: (el.getAttribute && el.getAttribute("aria-label")) || "",
       labelText,
+      context: findSectionContext(el, doc),
       required: isRequired(el, labelText),
       disabled: !!el.disabled,
       hidden: el.type === "hidden" || (el.offsetParent === null && tag !== "SELECT"),
@@ -279,8 +316,8 @@
   } catch (e) { /* non-browser (tests) */ }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, scanPage, fillPage };
+    module.exports = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, scanPage, fillPage };
   } else if (typeof window !== "undefined") {
-    window.CVFillContent = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, scanPage, fillPage };
+    window.CVFillContent = { isFillable, skipReason, resolveLabel, describeField, buildSuggestPayload, labelTextForElement, isRequired, findSectionContext, scanPage, fillPage };
   }
 })();

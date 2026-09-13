@@ -100,9 +100,12 @@
         tdLabel.appendChild(star);
       }
       const tdVal = document.createElement("td");
-      const inp = document.createElement("input");
-      inp.type = "text";
-      inp.value = suggestedValues[f.key] || "";
+      const val = suggestedValues[f.key] || "";
+      const multiline = f.type === "textarea" || /\n/.test(val) || val.length > 120;
+      const inp = document.createElement(multiline ? "textarea" : "input");
+      if (multiline) inp.rows = 3;
+      else inp.type = "text";
+      inp.value = val;
       inp.dataset.key = f.key;
       inp.addEventListener("input", () => {
         suggestedValues[f.key] = inp.value;
@@ -286,7 +289,7 @@
 
   async function onFill() {
     const boxes = Array.from(document.querySelectorAll('#fields input[type="checkbox"]'));
-    const inputs = Array.from(document.querySelectorAll('#fields input[type="text"]'));
+    const inputs = Array.from(document.querySelectorAll('#fields input[type="text"], #fields textarea'));
     const byKey = {};
     inputs.forEach((i) => { byKey[i.dataset.key] = i.value; });
     const checked = boxes.filter((cb) => cb.checked).map((cb) => cb.dataset.key);

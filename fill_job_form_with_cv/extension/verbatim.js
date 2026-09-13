@@ -8,11 +8,28 @@
 
   function isVerbatim(value, cvText) {
     if (value == null) return false;
-    if (String(value).trim() === "") return true;
-    const v = normalize(value);
+    const text = String(value).trim();
+    if (text === "") return true;
     const cv = normalize(cvText || "");
-    if (!v || !cv) return v === "";
-    return cv.includes(v);
+    const v = normalize(text);
+    if (!cv) return v === "";
+    if (cv.includes(v)) return true;
+    // Multi-line / bulleted block (experience or education description):
+    // accept when every non-empty line appears verbatim, in order.
+    const segments = text
+      .split(/[\r\n]+|\s+[-•*]\s+/)
+      .map((s) => s.replace(/^[-•*]\s+/, "").trim())
+      .filter(Boolean);
+    if (segments.length <= 1) return false;
+    let cursor = 0;
+    for (const segment of segments) {
+      const seg = normalize(segment);
+      if (!seg) continue;
+      const idx = cv.indexOf(seg, cursor);
+      if (idx === -1) return false;
+      cursor = idx + seg.length;
+    }
+    return true;
   }
 
   function validateValues(rawValues, cvText, fields) {

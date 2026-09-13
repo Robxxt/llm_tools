@@ -53,7 +53,14 @@ SYSTEM_PROMPT = (
     "4. For select/dropdown fields, return exactly one of the given "
     "options or an empty string. Never invent a new option.\n"
     "5. Never add explanations. Return ONLY a JSON object of the form "
-    "{\"values\": {\"<field_key>\": \"<exact CV substring or empty string>\"}}."
+    "{\"values\": {\"<field_key>\": \"<exact CV substring or empty string>\"}}.\n"
+    "6. For multi-line free-text fields (description, responsibilities, "
+    "summary), copy the ENTIRE relevant block from the matching CV section "
+    "verbatim, keeping the original bullet markers and line breaks. Never "
+    "summarise, reword, or merge bullets.\n"
+    "7. Each field may include a \"context\" naming the CV section it belongs "
+    "to (e.g. \"Education\", \"Professional Experience\"). Use it to pick the "
+    "matching entry; do not copy from a different section."
 )
 
 app = Flask(__name__)
@@ -141,13 +148,42 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
+_BULLET_SPLIT_RE = re.compile(r"[\r\n]+|\s+[-•*]\s+")
+
+
+def _strip_bullet(segment: str) -> str:
+    return re.sub(r"^[-•*]\s+", "", segment.strip())
+
+
 def is_verbatim(value: str, cv_text: str) -> bool:
-    """True if value is empty or appears verbatim (whitespace-insensitive) in the CV."""
+    """True if value is empty or copied verbatim from the CV.
+
+    A single-line value must be a substring. A multi-line / bulleted block
+    (e.g. an experience or education description) is accepted when every
+    non-empty line appears verbatim in the CV, in order. Each fragment must
+    still exist in the CV, so nothing can be hallucinated.
+    """
     if value is None:
         return False
-    if str(value).strip() == "":
+    text = str(value).strip()
+    if text == "":
         return True
-    return _normalize(str(value)) in _normalize(cv_text or "")
+    cv_norm = _normalize(cv_text or "")
+    if _normalize(text) in cv_norm:
+        return True
+    segments = [s for s in (_strip_bullet(p) for p in _BULLET_SPLIT_RE.split(text)) if s]
+    if len(segments) <= 1:
+        return False
+    cursor = 0
+    for segment in segments:
+        seg_norm = _normalize(segment)
+        if not seg_norm:
+            continue
+        idx = cv_norm.find(seg_norm, cursor)
+        if idx == -1:
+            return False
+        cursor = idx + len(seg_norm)
+    return True
 
 
 def validate_values(raw_values: dict, cv_text: str, fields: list):
@@ -183,6 +219,7 @@ def build_messages(cv_text: str, fields: list, model: str) -> dict:
             "label": f.get("label", ""),
             "name": f.get("name", ""),
             "type": f.get("type", "text"),
+            **({"context": f["context"]} if f.get("context") else {}),
             **({"options": f["options"]} if f.get("options") else {}),
         }
         for f in fields
@@ -194,8 +231,12 @@ def build_messages(cv_text: str, fields: list, model: str) -> dict:
         "-----\n\n"
         "FORM FIELDS (JSON):\n"
         f"{json.dumps(slim_fields, ensure_ascii=False)}\n\n"
+        "Each field's optional 'context' names its CV section; match it to that "
+        "section. For a description/responsibilities field, return EVERY matching "
+        "line from that section exactly as written (keep the leading '- ' bullets "
+        "and one per line). Do NOT summarise, reword or merge lines.\n"
         "Return ONLY JSON: {\"values\": {\"<key>\": \"<exact CV substring or empty string>\"}}. "
-        "Every non-empty value MUST be an exact substring of the CV text above. "
+        "Every non-empty value MUST appear verbatim in the CV text above. "
         "If unsure, use an empty string."
     )
     return {

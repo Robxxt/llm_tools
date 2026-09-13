@@ -102,7 +102,7 @@ def test_suggest_fill_requires_fields(client):
     assert resp.status_code == 400
 
 
-def test_suggest_fill_requires_provider(client):
+def test_suggest_fill_requires_provider(client, isolated_settings):
     resp = client.post("/api/suggest-fill", json={
         "cv_text": "John Doe",
         "fields": [{"key": "a", "label": "Full name"}],
@@ -131,6 +131,14 @@ def test_build_messages_uses_temperature_zero_and_strict_rules():
     assert "jane@example.com" in payload["messages"][1]["content"]
 
 
+def test_build_messages_forwards_field_context():
+    fields = [{"key": "f0", "label": "Description", "type": "textarea",
+               "context": "Education"}]
+    payload = build_messages("some cv", fields, model="llama3")
+    content = payload["messages"][1]["content"]
+    assert "\"context\": \"Education\"" in content
+
+
 # ---------- verbatim guard ----------
 
 def test_is_verbatim_accepts_exact_substring():
@@ -148,6 +156,39 @@ def test_is_verbatim_rejects_hallucination():
 
 def test_is_verbatim_empty_is_allowed():
     assert is_verbatim("", "anything") is True
+
+
+def test_is_verbatim_accepts_multiline_bullet_block_in_order():
+    cv = (
+        "PROFESSIONAL EXPERIENCE\n"
+        "- Designed and built a custom framework.\n"
+        "- Automated the documentation process.\n"
+        "EDUCATION\n"
+    )
+    block = ("- Designed and built a custom framework.\n"
+             "- Automated the documentation process.")
+    assert is_verbatim(block, cv) is True
+
+
+def test_is_verbatim_rejects_invented_bullet():
+    cv = "- Designed a framework.\n- Automated documentation."
+    block = "- Designed a framework.\n- Led a team of astronauts."
+    assert is_verbatim(block, cv) is False
+
+
+def test_is_verbatim_rejects_reordered_bullets():
+    cv = "- First thing.\n- Second thing."
+    block = "- Second thing.\n- First thing."
+    assert is_verbatim(block, cv) is False
+
+
+def test_validate_values_keeps_multiline_description():
+    cv = ("EXPERIENCE\n- Built thing A.\n- Built thing B.\n")
+    fields = [{"key": "f0", "label": "Description", "type": "textarea"}]
+    cleaned, dropped = validate_values(
+        {"f0": "- Built thing A.\n- Built thing B."}, cv, fields)
+    assert cleaned["f0"] == "- Built thing A.\n- Built thing B."
+    assert dropped == []
 
 
 def test_validate_values_drops_hallucinations():

@@ -9,6 +9,7 @@ const {
   buildSuggestPayload,
   labelTextForElement,
   isRequired,
+  findSectionContext,
   scanPage,
 } = require("../content.js");
 const { isVerbatim, validateValues } = require("../verbatim.js");
@@ -101,6 +102,24 @@ describe("verbatim guard", () => {
     ]);
     assert.equal(cleaned.f0, "");
   });
+  it("accepts a multi-line bullet block copied from the CV in order", () => {
+    const cv = "EXPERIENCE\n- Built thing A.\n- Built thing B.\n";
+    assert.equal(
+      isVerbatim("- Built thing A.\n- Built thing B.", cv),
+      true
+    );
+  });
+  it("rejects a bullet block with an invented line", () => {
+    const cv = "- Built thing A.\n- Built thing B.";
+    assert.equal(
+      isVerbatim("- Built thing A.\n- Led a team of astronauts.", cv),
+      false
+    );
+  });
+  it("rejects reordered bullets", () => {
+    const cv = "- First thing.\n- Second thing.";
+    assert.equal(isVerbatim("- Second thing.\n- First thing.", cv), false);
+  });
 });
 
 // ---------- skip reasons (explains what the scanner leaves alone) ----------
@@ -163,6 +182,32 @@ describe("labelTextForElement", () => {
     fakeNode({ tag: "DIV", children: [decoy, wrapper] });
     const doc = { getElementById: () => null, querySelector: () => null };
     assert.equal(labelTextForElement(input, doc), "");
+  });
+});
+
+describe("findSectionContext", () => {
+  it("finds the nearest heading above the field", () => {
+    const input = fakeNode({ tag: "INPUT" });
+    const fieldWrapper = fakeNode({ tag: "DIV", children: [input] });
+    const heading = fakeNode({ tag: "H2", text: "Education" });
+    fakeNode({ tag: "SECTION", children: [heading, fieldWrapper] });
+    assert.equal(findSectionContext(input, {}), "Education");
+  });
+  it("returns an empty string when no heading is nearby", () => {
+    const input = fakeNode({ tag: "INPUT" });
+    fakeNode({ tag: "DIV", children: [input] });
+    assert.equal(findSectionContext(input, {}), "");
+  });
+});
+
+describe("describeField context", () => {
+  it("carries the section context through to the model payload", () => {
+    const d = describeField(
+      { tag: "TEXTAREA", name: "description", context: "Education" },
+      0,
+      "Description"
+    );
+    assert.equal(d.context, "Education");
   });
 });
 
